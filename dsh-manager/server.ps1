@@ -573,18 +573,10 @@ try { Add-Type -TypeDefinition $nativeSrc -ErrorAction Stop; $nativeOk = $true }
 $f = New-Object System.Windows.Forms.FolderBrowserDialog
 $f.Description = '__DESC__'
 $f.ShowNewFolderButton = $false
-# 隐藏的置顶宿主窗口：对话框以它为 owner，初始即在普通窗口之上
-$owner = New-Object System.Windows.Forms.Form
-$owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
-$owner.ShowInTaskbar = $false
-$owner.TopMost = $true
-$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
-$owner.Location = New-Object System.Drawing.Point(-32000, -32000)
-$owner.Size = New-Object System.Drawing.Size(1, 1)
-$owner.Show()
 if ($nativeOk) {
-    # 定时强制置顶：对话框显示期间反复把本进程的 #32770 窗口设为 TOPMOST，
-    # 即使有别的置顶窗口也盖不住它
+    # 定时强制置顶：对话框显示期间反复把本进程的 #32770 窗口设为 TOPMOST。
+    # 注意：不能给对话框设 owner —— owned 窗口被 Windows 约束不能高于其 owner，
+    # 即使 SetWindowPos 也无法突破；所以用无主 ShowDialog + 定时置顶。
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 250
     $timer.Add_Tick({
@@ -610,9 +602,8 @@ if ($nativeOk) {
     })
     $timer.Start()
 }
-$r = $f.ShowDialog($owner)
+$r = $f.ShowDialog()
 if ($nativeOk) { $timer.Stop() }
-$owner.Close()
 if ($r -eq [System.Windows.Forms.DialogResult]::OK) {
     [System.IO.File]::WriteAllText($env:TEMP + '\dsh-picker-result.txt', $f.SelectedPath, (New-Object System.Text.UTF8Encoding($false)))
 } else {
@@ -1063,6 +1054,7 @@ while ($true) {
 Mgr-Log 'info' '面板已按请求退出，端口已释放。'
 try { $listener.Stop() } catch {}
 exit 0
+
 
 
 
