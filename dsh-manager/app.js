@@ -695,15 +695,19 @@ function toggleMarketSort() {
   loadMarketGitHub({ reset: true });
 }
 
-// 排序图标：降序=向下箭头，升序=向上箭头（纯线条）
+// 排序图标：左箭头=升序、右箭头=降序；升序时左箭头加粗，降序时右箭头加粗
 function updateMarketSortIcon() {
   const btn = document.getElementById('mkt-gh-sort');
   if (!btn) return;
-  const desc = ghState.order === 'desc';
-  btn.title = desc ? '切换排序（当前：按 ★ 降序）' : '切换排序（当前：按 ★ 升序）';
-  btn.innerHTML = desc
-    ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>'
-    : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>';
+  const asc = ghState.order === 'asc';
+  btn.title = asc ? '切换排序（当前：按 ★ 升序）' : '切换排序（当前：按 ★ 降序）';
+  const left = asc ? 2.8 : 1.5;
+  const right = asc ? 1.5 : 2.8;
+  btn.innerHTML =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path stroke-width="' + left + '" d="M6 21 L6 6 L1 12 L6 12"/>' +
+      '<path stroke-width="' + right + '" d="M14 4 L14 14 L18 14 L22 14 L18 20 L18 14"/>' +
+    '</svg>';
 }
 
 async function loadMarketUachar() {
