@@ -741,6 +741,11 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
                 if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
                 return New-JsonResp (Restart-Dsh)
             }
+            '/api/shutdown' {
+                if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
+                $script:ShutdownRequested = $true
+                return New-JsonResp @{ ok = $true; message = '面板即将退出（优雅关闭，端口立即释放）。' }
+            }
 
             '/api/plugins/install' {
                 if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
@@ -839,10 +844,21 @@ function Handle-Client($client) {
         $method = $requestLine[0]
         $rawPath = $requestLine[1]
         $contentLength = 0
+        $expectContinue = $false
         foreach ($h in $parts) {
-            if ($h -match '^Content-Length:\s*(\d+)') { $contentLength = [int]$matches[1]; break }
+            if ($h -match '^Content-Length:\s*(\d+)') { $contentLength = [int]$matches[1] }
+            elseif ($h -match '^Expect:\s*(.+)$') { if ($matches[1] -match '100-continue') { $expectContinue = $true } }
         }
-        Req-Log ("REQ " + $method + " " + $rawPath + " len=" + $contentLength)
+        Req-Log ("REQ " + $method + " " + $rawPath + " len=" + $contentLength + $(if ($expectContinue) { ' expect=100' } else { '' }))
+        if ($expectContinue) {
+            # 先回 100 Continue：客户端（或中间代理）在收到确认前不会发送请求体，
+            # 不回会导致 body 永远不来、读超时、浏览器报 Failed to fetch。
+            try {
+                $cont = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 100 Continue`r`n`r`n")
+                $stream.Write($cont, 0, $cont.Length)
+                $stream.Flush()
+            } catch {}
+        }
         if ($contentLength -gt 0) {
             while ($body.Length -lt $contentLength) {
                 $n = $stream.Read($buf, 0, $buf.Length)
@@ -929,15 +945,21 @@ if (-not $NoBrowser) {
     try { Start-Process $script:ManagerUrl } catch { Write-Host "[dsh] 自动打开浏览器失败，请手动访问 $script:ManagerUrl" }
 }
 
+$script:ShutdownRequested = $false
 while ($true) {
     try {
         $client = $listener.AcceptTcpClient()
         Handle-Client $client
+        if ($script:ShutdownRequested) { break }
     } catch {
         Write-Crash 'AcceptLoop' $_
         Start-Sleep -Milliseconds 200
     }
 }
+Mgr-Log 'info' '面板已按请求退出，端口已释放。'
+try { $listener.Stop() } catch {}
+exit 0
+
 
 
 
