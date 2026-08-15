@@ -556,27 +556,45 @@ function Save-DshmCheckout([string]$path) {
 
 $script:MarketGhCache = Join-Path $env:TEMP 'dshm-market-gh.json'
 $script:MarketCacheMinutes = 10
+$script:MarketGhToken = $null
+$script:MarketGhTokenAt = [datetime]::MinValue
 
-# GitHub topic:dsh-plugin 插件列表（按 star 降序，10 分钟缓存）
-# 读取市场缓存并归一化为数组（规避 PS 5.1 ConvertFrom-Json 对顶层数组的
-# 包装怪癖：@(管道|ConvertFrom-Json) 会把 50 个元素包成 1 个）
-function Read-MarketCache {
-    $parsed = Get-Content -LiteralPath $script:MarketGhCache -Raw -Encoding UTF8 | ConvertFrom-Json
-    return @($parsed)
+# 获取 GitHub 认证 token（gh CLI，缓存 55 分钟；无 gh 则匿名，受 10 次/分钟限制）
+function Get-GhToken {
+    if ($script:MarketGhToken -and ((Get-Date) - $script:MarketGhTokenAt).TotalMinutes -lt 55) { return $script:MarketGhToken }
+    try {
+        $tok = (& gh auth token 2>$null | Out-String).Trim()
+        if ($tok) {
+            $script:MarketGhToken = $tok
+            $script:MarketGhTokenAt = Get-Date
+            return $tok
+        }
+    } catch {}
+    return $null
 }
 
-function Get-GitHubMarket {
-    if (Test-Path $script:MarketGhCache) {
-        $age = (Get-Date) - (Get-Item $script:MarketGhCache).LastWriteTime
+# GitHub topic:dsh-plugin 插件分页列表（order=desc/asc，page>=1，refresh=1 强制重拉，
+# 每页 50 个、10 分钟缓存；GitHub 搜索上限 1000 条，遍历完 done=true）
+function Get-GitHubMarket([string]$order = 'desc', [int]$page = 1, [bool]$refresh = $false) {
+    if ($order -ne 'asc') { $order = 'desc' }
+    if ($page -lt 1) { $page = 1 }
+    $perPage = 50
+    $cacheFile = Join-Path $env:TEMP ("dshm-market-gh-{0}-p{1}.json" -f $order, $page)
+    if (-not $refresh -and (Test-Path $cacheFile)) {
+        $age = (Get-Date) - (Get-Item $cacheFile).LastWriteTime
         if ($age.TotalMinutes -lt $script:MarketCacheMinutes) {
             try {
-                return @{ ok = $true; cached = $true; source = 'github'; plugins = Read-MarketCache }
+                $cached = Get-Content -LiteralPath $cacheFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                return @{ ok = $true; cached = $true; source = 'github'; order = $order; page = $page; total = $cached.total; done = $cached.done; plugins = @($cached.plugins) }
             } catch {}
         }
     }
-    $url = 'https://api.github.com/search/repositories?q=topic:dsh-plugin&sort=stars&order=desc&per_page=50'
+    $url = "https://api.github.com/search/repositories?q=topic:dsh-plugin&sort=stars&order=$order&per_page=$perPage&page=$page"
     try {
-        $resp = Invoke-RestMethod -Uri $url -Headers @{ 'User-Agent' = 'dshm-panel'; 'Accept' = 'application/vnd.github+json' } -TimeoutSec 20
+        $headers = @{ 'User-Agent' = 'dshm-panel'; 'Accept' = 'application/vnd.github+json' }
+        $tok = Get-GhToken
+        if ($tok) { $headers['Authorization'] = 'Bearer ' + $tok }
+        $resp = Invoke-RestMethod -Uri $url -Headers $headers -TimeoutSec 20
         $plugins = @($resp.items | ForEach-Object {
             [pscustomobject]@{
                 name = [string]$_.full_name
@@ -585,13 +603,18 @@ function Get-GitHubMarket {
                 url = [string]$_.html_url
             }
         })
-        $plugins | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:MarketGhCache -Encoding UTF8
-        return @{ ok = $true; cached = $false; source = 'github'; plugins = $plugins }
+        $total = [int]$resp.total_count
+        if ($total -gt 1000) { $total = 1000 }
+        $done = (($page - 1) * $perPage + $plugins.Count) -ge $total
+        @{ order = $order; page = $page; total = $total; done = $done; plugins = $plugins } |
+            ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cacheFile -Encoding UTF8
+        return @{ ok = $true; cached = $false; source = 'github'; order = $order; page = $page; total = $total; done = $done; plugins = $plugins }
     } catch {
         # 拉取失败：回退到旧缓存
-        if (Test-Path $script:MarketGhCache) {
+        if (Test-Path $cacheFile) {
             try {
-                return @{ ok = $true; cached = $true; stale = $true; source = 'github'; plugins = Read-MarketCache }
+                $cached = Get-Content -LiteralPath $cacheFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                return @{ ok = $true; cached = $true; stale = $true; source = 'github'; order = $order; page = $page; total = $cached.total; done = $cached.done; plugins = @($cached.plugins) }
             } catch {}
         }
         return @{ ok = $false; message = "GitHub 插件列表拉取失败：$($_.Exception.Message)" }
@@ -839,7 +862,12 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
             }
             '/api/market/github' {
                 if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
-                return New-JsonResp (Get-GitHubMarket)
+                $q = Get-Query $rawPath
+                $order = if ($q['order']) { [string]$q['order'] } else { 'desc' }
+                $page = 1
+                if ($q['page'] -match '^\d+$') { $page = [int]$q['page'] }
+                $refresh = ($q['refresh'] -eq '1')
+                return New-JsonResp (Get-GitHubMarket $order $page $refresh)
             }
             '/api/market/uachar' {
                 if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
@@ -1154,6 +1182,7 @@ while ($true) {
 Mgr-Log 'info' '面板已按请求退出，端口已释放。'
 try { $listener.Stop() } catch {}
 exit 0
+
 
 
 

@@ -90,7 +90,7 @@ function switchTab(tab) {
     refreshPlugins();
   }
   if (tab === 'market') {
-    loadMarketGitHub();
+    if (!ghState.items.length) loadMarketGitHub({ reset: true });
     loadMarketUachar();
   }
 }
@@ -511,6 +511,8 @@ async function saveDshConfig() {
 
 let marketQuery = { github: '', uachar: '' };
 let marketData = { github: [], uachar: [] };
+// GitHub 市场分页状态：order 排序方向 / page 当前页 / done 是否遍历完 / loading 防重入
+const ghState = { order: 'desc', page: 1, done: false, loading: false, items: [] };
 
 // GitHub / uAchar 子标签切换
 function switchMarketTab(tab) {
@@ -639,19 +641,69 @@ function renderMarketUachar() {
   });
 }
 
-async function loadMarketGitHub() {
+// 分页加载 GitHub 插件：opts.reset=true 时重置为第 1 页；否则加载下一页追加
+async function loadMarketGitHub(opts) {
+  if (ghState.loading) return;
   const el = document.getElementById('mkt-gh-list');
+  const reset = !!(opts && opts.reset);
+  if (reset) {
+    ghState.page = 1;
+    ghState.done = false;
+    ghState.items = [];
+    marketData.github = [];
+    el.innerHTML = '<div class="ds-market-empty">加载中...</div>';
+  }
+  if (ghState.done) return;
+  ghState.loading = true;
+  const url = '/api/market/github?order=' + ghState.order + '&page=' + ghState.page + (reset ? '&refresh=1' : '');
   try {
-    const r = await api('/api/market/github', {}, 30000);
+    const r = await api(url, {}, 30000);
     if (!r || !r.ok) {
       marketEmpty(el, (r && r.message) || 'GitHub 插件列表加载失败');
       return;
     }
-    marketData.github = r.plugins || [];
+    ghState.items = ghState.items.concat(r.plugins || []);
+    ghState.done = !!r.done;
+    ghState.page = r.page || ghState.page;
+    marketData.github = ghState.items;
     renderMarketGitHub();
+    if (!ghState.done && ghState.items.length && el.scrollTop + el.clientHeight >= el.scrollHeight - 40) {
+      ghState.page += 1;
+      loadMarketGitHub();
+    }
   } catch (e) {
-    marketEmpty(el, '加载失败：' + e.message);
+    if (reset) marketEmpty(el, '加载失败：' + e.message);
+  } finally {
+    ghState.loading = false;
   }
+}
+
+// 滚动到底部（距底 80px 内）时加载下一页
+function onMarketGhScroll() {
+  const el = document.getElementById('mkt-gh-list');
+  if (!el || ghState.loading || ghState.done) return;
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 80) {
+    ghState.page += 1;
+    loadMarketGitHub();
+  }
+}
+
+// 排序切换（升/降序）：切换时强制重新拉取 GitHub 数据
+function toggleMarketSort() {
+  ghState.order = ghState.order === 'desc' ? 'asc' : 'desc';
+  updateMarketSortIcon();
+  loadMarketGitHub({ reset: true });
+}
+
+// 排序图标：降序=向下箭头，升序=向上箭头（纯线条）
+function updateMarketSortIcon() {
+  const btn = document.getElementById('mkt-gh-sort');
+  if (!btn) return;
+  const desc = ghState.order === 'desc';
+  btn.title = desc ? '切换排序（当前：按 ★ 降序）' : '切换排序（当前：按 ★ 升序）';
+  btn.innerHTML = desc
+    ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>'
+    : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>';
 }
 
 async function loadMarketUachar() {
@@ -709,8 +761,10 @@ async function saveMarketConfig() {
 document.addEventListener('DOMContentLoaded', () => {
   const gh = document.getElementById('mkt-gh-search');
   const ua = document.getElementById('mkt-ua-search');
+  const ghList = document.getElementById('mkt-gh-list');
   if (gh) gh.addEventListener('input', e => { marketQuery.github = e.target.value.trim().toLowerCase(); renderMarketGitHub(); });
   if (ua) ua.addEventListener('input', e => { marketQuery.uachar = e.target.value.trim().toLowerCase(); renderMarketUachar(); });
+  if (ghList) ghList.addEventListener('scroll', onMarketGhScroll);
 });
 
 // 来源切换时更新输入框占位提示
