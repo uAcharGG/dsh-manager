@@ -850,8 +850,10 @@ function Handle-Client($client) {
             elseif ($h -match '^Expect:\s*(.+)$') { if ($matches[1] -match '100-continue') { $expectContinue = $true } }
         }
         Req-Log ("REQ " + $method + " " + $rawPath + " len=" + $contentLength + $(if ($expectContinue) { ' expect=100' } else { '' }))
-        if ($expectContinue) {
-            # 先回 100 Continue：客户端（或中间代理）在收到确认前不会发送请求体，
+        if ($contentLength -gt 0 -and $body.Length -lt $contentLength) {
+            # 请求体尚未收全：先回 100 Continue。覆盖两类客户端——
+            # 1) 带 Expect: 100-continue 的（标准行为）；
+            # 2) 不带 Expect 但同样等服务器先回话才发 body 的浏览器/中间代理。
             # 不回会导致 body 永远不来、读超时、浏览器报 Failed to fetch。
             try {
                 $cont = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 100 Continue`r`n`r`n")
@@ -906,10 +908,17 @@ if ($existing) {
 }
 
 # 端口自动回退：默认端口被残留进程占用时依次尝试后续端口，保证面板一定能起来
+# 先定义非继承句柄工具（防止子进程继承监听 socket）
+try {
+    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class DshmNative { [DllImport("kernel32.dll", SetLastError = true)] public static extern bool SetHandleInformation(IntPtr hObject, uint dwMask, uint dwFlags); }' -ErrorAction SilentlyContinue
+} catch {}
 $listener = $null
 $boundPort = $null
 foreach ($tryPort in ($ManagerPort..($ManagerPort + 10))) {
     $try = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $tryPort)
+    # 关键：清除监听 socket 的继承位。否则 Start-Dsh 等 UseShellExecute=$false 的
+    # 子进程会继承该句柄，面板退出/被杀后端口被孤儿 socket 占住，无法重启。
+    try { [DshmNative]::SetHandleInformation($try.Server.Handle, 1, 0) | Out-Null } catch {}
     try {
         $try.Start()
         $listener = $try
@@ -959,6 +968,8 @@ while ($true) {
 Mgr-Log 'info' '面板已按请求退出，端口已释放。'
 try { $listener.Stop() } catch {}
 exit 0
+
+
 
 
 
