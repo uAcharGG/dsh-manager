@@ -83,9 +83,15 @@ function switchTab(tab) {
   document.querySelector('.ds-nav-item[data-tab="' + tab + '"]').classList.add('active');
   document.getElementById('tab-launch').classList.toggle('ds-hidden', tab !== 'launch');
   document.getElementById('tab-plugins').classList.toggle('ds-hidden', tab !== 'plugins');
-  document.getElementById('page-title').textContent = tab === 'launch' ? '一键启动' : '插件管理';
+  document.getElementById('tab-market').classList.toggle('ds-hidden', tab !== 'market');
+  document.getElementById('page-title').textContent =
+    tab === 'launch' ? '一键启动' : tab === 'plugins' ? '插件管理' : '插件市场';
   if (tab === 'plugins') {
     refreshPlugins();
+  }
+  if (tab === 'market') {
+    loadMarketGitHub();
+    loadMarketUachar();
   }
 }
 
@@ -462,11 +468,13 @@ async function pickLocalFolder() {
 
 // ── dsh 启动路径 ───────────────────────────────────────────────────────────
 
-// 读取后端当前生效的 dsh 启动路径
+// 读取后端当前生效的 dsh 启动路径与市场配置
 async function loadDshConfig() {
   try {
     const cfg = await api('/api/config');
     document.getElementById('dsh-checkout').value = cfg.checkout || '';
+    const mkt = document.getElementById('mkt-ua-url');
+    if (mkt) mkt.value = cfg.marketUrl || '';
   } catch (e) { /* 后端未就绪时输入框保持为空 */ }
 }
 
@@ -498,6 +506,212 @@ async function saveDshConfig() {
     btn.disabled = false;
   }
 }
+
+// ── 插件市场 ───────────────────────────────────────────────────────────────
+
+let marketQuery = { github: '', uachar: '' };
+let marketData = { github: [], uachar: [] };
+
+// GitHub / uAchar 子标签切换
+function switchMarketTab(tab) {
+  document.getElementById('st-github').classList.toggle('active', tab === 'github');
+  document.getElementById('st-uachar').classList.toggle('active', tab === 'uachar');
+  document.getElementById('mkt-github').classList.toggle('ds-hidden', tab !== 'github');
+  document.getElementById('mkt-uachar').classList.toggle('ds-hidden', tab !== 'uachar');
+  if (tab === 'uachar') loadMarketUachar();
+}
+
+function fmtCount(n) {
+  return n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n);
+}
+
+function marketEmpty(el, text) {
+  el.innerHTML = '';
+  const d = document.createElement('div');
+  d.className = 'ds-market-empty';
+  d.textContent = text;
+  el.appendChild(d);
+}
+
+function renderMarketGitHub() {
+  const el = document.getElementById('mkt-gh-list');
+  const q = marketQuery.github;
+  const rows = marketData.github.filter(p => !q || (p.name + ' ' + (p.description || '')).toLowerCase().includes(q));
+  if (!rows.length) {
+    marketEmpty(el, marketData.github.length ? '没有匹配的插件' : '暂无数据，请刷新重试');
+    return;
+  }
+  el.innerHTML = '';
+  rows.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'ds-market-row';
+    const info = document.createElement('div');
+    info.className = 'ds-market-info';
+    const nameRow = document.createElement('div');
+    nameRow.className = 'ds-market-name';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = p.name;
+    nameRow.appendChild(name);
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = 'GitHub';
+    nameRow.appendChild(badge);
+    info.appendChild(nameRow);
+    const meta = document.createElement('div');
+    meta.className = 'ds-market-meta';
+    const star = document.createElement('span');
+    star.className = 'star';
+    star.textContent = '★ ' + fmtCount(p.stars || 0);
+    meta.appendChild(star);
+    info.appendChild(meta);
+    if (p.description) {
+      const desc = document.createElement('div');
+      desc.className = 'ds-market-desc';
+      desc.textContent = p.description;
+      info.appendChild(desc);
+    }
+    row.appendChild(info);
+    const actions = document.createElement('div');
+    actions.className = 'ds-market-actions';
+    const link = document.createElement('a');
+    link.className = 'ds-icon-btn';
+    link.title = '打开项目 README';
+    link.href = p.url || ('https://github.com/' + p.name);
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+    actions.appendChild(link);
+    row.appendChild(actions);
+    el.appendChild(row);
+  });
+}
+
+function renderMarketUachar() {
+  const el = document.getElementById('mkt-ua-list');
+  const q = marketQuery.uachar;
+  const rows = marketData.uachar.filter(p => !q || (p.name + ' ' + (p.description || '')).toLowerCase().includes(q));
+  if (!rows.length) {
+    marketEmpty(el, marketData.uachar.length ? '没有匹配的插件' : '市场暂无插件，或尚未配置市场地址');
+    return;
+  }
+  el.innerHTML = '';
+  rows.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'ds-market-row';
+    const info = document.createElement('div');
+    info.className = 'ds-market-info';
+    const nameRow = document.createElement('div');
+    nameRow.className = 'ds-market-name';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = p.name;
+    nameRow.appendChild(name);
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = 'uAchar';
+    nameRow.appendChild(badge);
+    info.appendChild(nameRow);
+    const meta = document.createElement('div');
+    meta.className = 'ds-market-meta';
+    const dl = document.createElement('span');
+    dl.className = 'dl';
+    dl.textContent = '↓ ' + fmtCount(p.downloads || 0);
+    meta.appendChild(dl);
+    info.appendChild(meta);
+    if (p.description) {
+      const desc = document.createElement('div');
+      desc.className = 'ds-market-desc';
+      desc.textContent = p.description;
+      info.appendChild(desc);
+    }
+    row.appendChild(info);
+    const actions = document.createElement('div');
+    actions.className = 'ds-market-actions';
+    const btn = document.createElement('button');
+    btn.className = 'ds-btn primary';
+    btn.textContent = '下载安装';
+    btn.title = '统一安装标准';
+    btn.addEventListener('click', () => installFromMarket(p));
+    actions.appendChild(btn);
+    row.appendChild(actions);
+    el.appendChild(row);
+  });
+}
+
+async function loadMarketGitHub() {
+  const el = document.getElementById('mkt-gh-list');
+  try {
+    const r = await api('/api/market/github', {}, 30000);
+    if (!r || !r.ok) {
+      marketEmpty(el, (r && r.message) || 'GitHub 插件列表加载失败');
+      return;
+    }
+    marketData.github = r.plugins || [];
+    renderMarketGitHub();
+  } catch (e) {
+    marketEmpty(el, '加载失败：' + e.message);
+  }
+}
+
+async function loadMarketUachar() {
+  const el = document.getElementById('mkt-ua-list');
+  try {
+    const r = await api('/api/market/uachar', {}, 20000);
+    if (!r || !r.ok) {
+      marketEmpty(el, (r && r.message) || 'uAchar 市场加载失败');
+      return;
+    }
+    marketData.uachar = r.plugins || [];
+    renderMarketUachar();
+  } catch (e) {
+    marketEmpty(el, '加载失败：' + e.message);
+  }
+}
+
+// 从 uAchar 市场安装（统一安装标准：spec 为 tarball/npm 安装地址）
+async function installFromMarket(p) {
+  if (!p.spec) {
+    alert('该插件缺少安装地址（spec），请稍后再试或联系市场维护者。');
+    return;
+  }
+  if (state.status && state.status.running) {
+    alert('dsh 服务正在运行，不能安装插件。\n\n请先点击「停止服务」关闭 dsh，再安装。');
+    return;
+  }
+  if (state.busy) return;
+  if (!confirm('从 uAchar 插件市场安装 ' + p.name + ' ？')) return;
+  try {
+    const r = await api('/api/plugins/install?profile=web&source=' + (p.source || 'tarball') + '&spec=' + encodeURIComponent(p.spec), { method: 'POST' }, 20000);
+    appendLogLine(document.getElementById('plugin-log'),
+      '[' + now() + '] info    ' + (r.message || '已开始安装'));
+    await refreshStatus();
+  } catch (e) {
+    alert('安装失败：' + e.message);
+  }
+}
+
+// 保存 uAchar 市场地址
+async function saveMarketConfig() {
+  const val = document.getElementById('mkt-ua-url').value.trim();
+  try {
+    const r = await api('/api/config?marketUrl=' + encodeURIComponent(val), { method: 'POST' }, 15000);
+    appendLogLine(document.getElementById('plugin-log'),
+      '[' + now() + '] ' + (r.ok ? 'ok      市场地址已保存' : 'warn    保存失败：' + (r.message || '')));
+    if (!r.ok) alert('保存失败：' + (r.message || '未知错误'));
+    else loadMarketUachar();
+  } catch (e) {
+    alert('保存失败：' + e.message);
+  }
+}
+
+// 市场搜索监听（页面加载后绑定）
+document.addEventListener('DOMContentLoaded', () => {
+  const gh = document.getElementById('mkt-gh-search');
+  const ua = document.getElementById('mkt-ua-search');
+  if (gh) gh.addEventListener('input', e => { marketQuery.github = e.target.value.trim().toLowerCase(); renderMarketGitHub(); });
+  if (ua) ua.addEventListener('input', e => { marketQuery.uachar = e.target.value.trim().toLowerCase(); renderMarketUachar(); });
+});
 
 // 来源切换时更新输入框占位提示
 document.addEventListener('DOMContentLoaded', () => {

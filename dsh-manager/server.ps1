@@ -517,10 +517,29 @@ function Load-DshmConfig {
 
 # 当前配置视图（GET /api/config）
 function Get-DshmConfig {
-    return @{ checkout = $script:Checkout; configFile = $script:DshmConfigFile }
+    return @{
+        checkout = $script:Checkout
+        marketUrl = if ($script:DshmConfig['marketUrl']) { [string]$script:DshmConfig['marketUrl'] } else { '' }
+        configFile = $script:DshmConfigFile
+    }
 }
 
-# 保存 dsh 启动路径（POST /api/config）
+# 通用配置写入：保存任意键到 dshm-config.json（checkout / marketUrl ...）
+function Save-DshmConfigKey([string]$key, [string]$value) {
+    $value = $value.Trim()
+    $script:DshmConfig[$key] = $value
+    try {
+        $cfgDir = Split-Path -Parent $script:DshmConfigFile
+        if (-not (Test-Path -LiteralPath $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+        [System.IO.File]::WriteAllText($script:DshmConfigFile, ($script:DshmConfig | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+        Mgr-Log 'ok' "配置已更新：$key = $value"
+        return @{ ok = $true; $key = $value; message = "已保存：$key = $value" }
+    } catch {
+        return @{ ok = $false; message = "保存 dshm 配置失败：$($_.Exception.Message)" }
+    }
+}
+
+# 保存 dsh 启动路径（POST /api/config，checkout=...）
 function Save-DshmCheckout([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path)) {
         return @{ ok = $false; message = '启动路径不能为空。' }
@@ -530,15 +549,69 @@ function Save-DshmCheckout([string]$path) {
         return @{ ok = $false; message = "路径不存在或不是文件夹：$path" }
     }
     $script:Checkout = $path
-    $script:DshmConfig['checkout'] = $path
+    return Save-DshmConfigKey 'checkout' $path
+}
+
+# ── 插件市场 ────────────────────────────────────────────────────────────────
+
+$script:MarketGhCache = Join-Path $env:TEMP 'dshm-market-gh.json'
+$script:MarketCacheMinutes = 10
+
+# GitHub topic:dsh-plugin 插件列表（按 star 降序，10 分钟缓存）
+function Get-GitHubMarket {
+    if (Test-Path $script:MarketGhCache) {
+        $age = (Get-Date) - (Get-Item $script:MarketGhCache).LastWriteTime
+        if ($age.TotalMinutes -lt $script:MarketCacheMinutes) {
+            try {
+                return @{ ok = $true; cached = $true; source = 'github'; plugins = @(Get-Content -LiteralPath $script:MarketGhCache -Raw -Encoding UTF8 | ConvertFrom-Json) }
+            } catch {}
+        }
+    }
+    $url = 'https://api.github.com/search/repositories?q=topic:dsh-plugin&sort=stars&order=desc&per_page=50'
     try {
-        $cfgDir = Split-Path -Parent $script:DshmConfigFile
-        if (-not (Test-Path -LiteralPath $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
-        [System.IO.File]::WriteAllText($script:DshmConfigFile, ($script:DshmConfig | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
-        Mgr-Log 'ok' "启动路径已更新：$path（下次启动 dsh 时生效）"
-        return @{ ok = $true; checkout = $path; message = "启动路径已保存：$path`n下次点击「启动服务」将按新路径启动，当前运行的 dsh 不受影响。" }
+        $resp = Invoke-RestMethod -Uri $url -Headers @{ 'User-Agent' = 'dshm-panel'; 'Accept' = 'application/vnd.github+json' } -TimeoutSec 20
+        $plugins = @($resp.items | ForEach-Object {
+            [pscustomobject]@{
+                name = [string]$_.full_name
+                stars = [int]$_.stargazers_count
+                description = if ($_.description) { [string]$_.description } else { '' }
+                url = [string]$_.html_url
+            }
+        })
+        $plugins | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:MarketGhCache -Encoding UTF8
+        return @{ ok = $true; cached = $false; source = 'github'; plugins = $plugins }
     } catch {
-        return @{ ok = $false; message = "保存 dshm 配置失败：$($_.Exception.Message)" }
+        # 拉取失败：回退到旧缓存
+        if (Test-Path $script:MarketGhCache) {
+            try {
+                return @{ ok = $true; cached = $true; stale = $true; source = 'github'; plugins = @(Get-Content -LiteralPath $script:MarketGhCache -Raw -Encoding UTF8 | ConvertFrom-Json) }
+            } catch {}
+        }
+        return @{ ok = $false; message = "GitHub 插件列表拉取失败：$($_.Exception.Message)" }
+    }
+}
+
+# uAchar 插件市场（统一安装标准：marketUrl/api/plugins 返回 { name, downloads, description, spec }）
+function Get-UacharMarket {
+    $marketUrl = $script:DshmConfig['marketUrl']
+    if ([string]::IsNullOrWhiteSpace($marketUrl)) {
+        return @{ ok = $true; configured = $false; plugins = @(); message = '尚未配置 uAchar 插件市场地址（设置 → uAchar 市场地址）。' }
+    }
+    $url = $marketUrl.TrimEnd('/') + '/api/plugins'
+    try {
+        $resp = Invoke-RestMethod -Uri $url -TimeoutSec 12
+        $plugins = @($resp | ForEach-Object {
+            [pscustomobject]@{
+                name = [string]$_.name
+                downloads = if ($null -ne $_.downloads) { [long]$_.downloads } else { 0 }
+                description = if ($_.description) { [string]$_.description } else { '' }
+                spec = if ($_.spec) { [string]$_.spec } else { '' }
+                source = if ($_.source) { [string]$_.source } else { 'tarball' }
+            }
+        })
+        return @{ ok = $true; configured = $true; plugins = $plugins }
+    } catch {
+        return @{ ok = $false; configured = $true; message = "uAchar 市场拉取失败：$($_.Exception.Message)" }
     }
 }
 
@@ -742,8 +815,28 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
                     try { $req = $body | ConvertFrom-Json } catch {}
                     if ($req -and $null -ne $req.checkout) { $checkout = [string]$req.checkout }
                 }
-                if ($null -eq $checkout -or $checkout -eq '') { return New-JsonResp @{ error = 'checkout required' } 400 }
-                return New-JsonResp (Save-DshmCheckout $checkout)
+                if ($null -ne $checkout -and $checkout -ne '') { return New-JsonResp (Save-DshmCheckout $checkout) }
+                # marketUrl：显式传空串表示清空（取消配置），与"未传参"区分
+                $hasMarketParam = $q.ContainsKey('marketUrl')
+                $marketUrl = if ($hasMarketParam) { [string]$q['marketUrl'] } else { $null }
+                if (-not $hasMarketParam) {
+                    $req2 = $null
+                    try { $req2 = $body | ConvertFrom-Json } catch {}
+                    if ($req2 -and $null -ne $req2.marketUrl) {
+                        $marketUrl = [string]$req2.marketUrl
+                        $hasMarketParam = $true
+                    }
+                }
+                if ($hasMarketParam) { return New-JsonResp (Save-DshmConfigKey 'marketUrl' $marketUrl) }
+                return New-JsonResp @{ error = 'checkout or marketUrl required' } 400
+            }
+            '/api/market/github' {
+                if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
+                return New-JsonResp (Get-GitHubMarket)
+            }
+            '/api/market/uachar' {
+                if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
+                return New-JsonResp (Get-UacharMarket)
             }
             '/api/pick-directory' {
                 if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
@@ -1054,6 +1147,8 @@ while ($true) {
 Mgr-Log 'info' '面板已按请求退出，端口已释放。'
 try { $listener.Stop() } catch {}
 exit 0
+
+
 
 
 

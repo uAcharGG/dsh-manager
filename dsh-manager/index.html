@@ -441,6 +441,55 @@
     margin-top: 6px;
   }
 
+  .ds-subtabs { display: flex; gap: 8px; }
+  .ds-subtab {
+    padding: 7px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all var(--t-fast) var(--ease-out);
+    font-family: var(--font-sans);
+  }
+  .ds-subtab:hover { background: var(--bg-active); color: var(--text-primary); }
+  .ds-subtab.active { background: var(--bg-active); color: var(--text-primary); border-color: var(--border-hover); }
+  .ds-sort-hint { font-size: 12px; color: var(--text-tertiary); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+
+  .ds-market-list { display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow-y: auto; }
+  .ds-market-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    transition: background var(--t-fast) var(--ease-out);
+    flex-shrink: 0;
+    gap: 12px;
+  }
+  .ds-market-row:hover { background: var(--bg-active); }
+  .ds-market-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+  .ds-market-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ds-market-name .name { font-size: 14px; font-weight: 500; color: var(--text-primary); font-family: var(--font-mono); word-break: break-all; }
+  .ds-market-name .badge { font-size: 11px; color: var(--accent); border: 1px solid var(--border); border-radius: 6px; padding: 1px 7px; white-space: nowrap; }
+  .ds-market-meta { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--text-secondary); flex-wrap: wrap; }
+  .ds-market-meta .star { color: var(--warning); display: inline-flex; align-items: center; gap: 4px; font-weight: 500; }
+  .ds-market-meta .dl { color: var(--positive); display: inline-flex; align-items: center; gap: 4px; font-weight: 500; }
+  .ds-market-desc { font-size: 12px; color: var(--text-tertiary); line-height: 1.5; }
+  .ds-market-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+  .ds-icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 7px;
+    border: 1px solid var(--border); background: transparent; color: var(--text-secondary);
+    cursor: pointer; transition: all var(--t-fast) var(--ease-out);
+  }
+  .ds-icon-btn:hover { background: var(--bg-active); color: var(--text-primary); border-color: var(--border-hover); }
+  .ds-market-config { display: flex; gap: 8px; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .ds-market-empty { color: var(--text-tertiary); font-size: 13px; padding: 18px; text-align: center; }
+
   .ds-hidden { display: none; }
   .ds-busy-hint { color: var(--warning); font-size: 12px; }
 </style>
@@ -458,6 +507,10 @@
     <div class="ds-nav-item" data-tab="plugins" onclick="switchTab('plugins')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
       插件管理
+    </div>
+    <div class="ds-nav-item" data-tab="market" onclick="switchTab('market')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg>
+      插件市场
     </div>
   </div>
 
@@ -559,6 +612,41 @@
         <div class="ds-section">
           <h3 class="ds-section-title">插件日志</h3>
           <div class="ds-log ds-scrollbox" id="plugin-log"></div>
+        </div>
+      </div>
+
+      <!-- 插件市场面板 -->
+      <div id="tab-market" class="ds-hidden">
+        <div class="ds-subtabs">
+          <button class="ds-subtab active" id="st-github" onclick="switchMarketTab('github')">GitHub · dsh-plugin</button>
+          <button class="ds-subtab" id="st-uachar" onclick="switchMarketTab('uachar')">uAchar Plugin Market</button>
+        </div>
+
+        <div class="ds-section" id="mkt-github">
+          <div class="ds-section-title-row">
+            <h3 class="ds-section-title">GitHub dsh-plugin 插件（按 ★ 数排序）</h3>
+            <div style="display:flex;gap:8px;align-items:center;flex:1;justify-content:flex-end;">
+              <input class="ds-input" id="mkt-gh-search" type="text" placeholder="搜索插件名称 / 描述..." style="max-width:240px;">
+              <span class="ds-sort-hint">★ 降序</span>
+            </div>
+          </div>
+          <div class="ds-market-list ds-scrollbox" id="mkt-gh-list"><div class="ds-market-empty">加载中...</div></div>
+        </div>
+
+        <div class="ds-section ds-hidden" id="mkt-uachar">
+          <div class="ds-section-title-row">
+            <h3 class="ds-section-title">uAchar Plugin Market 插件（按下载量排序）</h3>
+            <div style="display:flex;gap:8px;align-items:center;flex:1;justify-content:flex-end;">
+              <input class="ds-input" id="mkt-ua-search" type="text" placeholder="搜索插件名称 / 描述..." style="max-width:240px;">
+              <span class="ds-sort-hint">下载量 降序</span>
+            </div>
+          </div>
+          <div class="ds-market-list ds-scrollbox" id="mkt-ua-list"><div class="ds-market-empty">加载中...</div></div>
+          <div class="ds-market-config">
+            <label class="ds-label" for="mkt-ua-url">市场地址</label>
+            <input class="ds-input" id="mkt-ua-url" type="text" placeholder="https://market.example.com（你的 uAchar 插件市场根地址）" style="max-width:340px;">
+            <button class="ds-btn small" onclick="saveMarketConfig()">保存</button>
+          </div>
         </div>
       </div>
     </div>
