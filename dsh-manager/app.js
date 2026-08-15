@@ -341,15 +341,11 @@ function buildPluginRow(p, profile) {
     const toggle = document.createElement('div');
     toggle.className = 'ds-toggle' + (p.enabled ? ' on' : '');
     toggle.title = p.enabled ? '点击停用' : '点击启用';
-    toggle.addEventListener('click', async () => {
+      toggle.addEventListener('click', async () => {
       if (state.busy) return;
       toggle.classList.toggle('on');
       try {
-        const r = await api('/api/plugins/toggle', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profile: profile, name: p.name, enable: !p.enabled }),
-        }, 15000);
+        const r = await api('/api/plugins/toggle?profile=' + encodeURIComponent(profile) + '&name=' + encodeURIComponent(p.name) + '&enable=' + (!p.enabled), { method: 'POST' }, 15000);
         appendLogLine(document.getElementById('plugin-log'),
           '[' + now() + '] info    ' + (r.message || '已切换'));
       } catch (e) {
@@ -380,11 +376,7 @@ async function uninstallPlugin(p, profile) {
     return;
   }
   try {
-    const r = await api('/api/plugins/uninstall', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile: profile, name: p.name }),
-    }, 15000);
+    const r = await api('/api/plugins/uninstall?profile=' + encodeURIComponent(profile) + '&name=' + encodeURIComponent(p.name), { method: 'POST' }, 15000);
     appendLogLine(document.getElementById('plugin-log'),
       '[' + now() + '] info    ' + (r.message || '已开始卸载'));
     await refreshStatus();
@@ -409,11 +401,7 @@ async function installPlugin() {
   }
   const profile = document.getElementById('profile-select').value || 'web';
   try {
-    const r = await api('/api/plugins/install', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile: profile, source: source, spec: input }),
-    }, 15000);
+    const r = await api('/api/plugins/install?profile=' + encodeURIComponent(profile) + '&source=' + encodeURIComponent(source) + '&spec=' + encodeURIComponent(input), { method: 'POST' }, 15000);
     appendLogLine(document.getElementById('plugin-log'),
       '[' + now() + '] info    ' + (r.message || '已开始安装'));
     if (r.ok) document.getElementById('install-input').value = '';
@@ -430,11 +418,8 @@ async function pickDirectory(desc, onPicked) {
   let r = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      r = await api('/api/pick-directory', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ desc: desc }),
-      }, 10000);
+      // desc 走查询参数（无 body）：规避部分浏览器/代理无法发送请求体的问题
+      r = await api('/api/pick-directory?desc=' + encodeURIComponent(desc), { method: 'POST' }, 10000);
       break;
     } catch (e) {
       if (attempt < 2) {
@@ -503,11 +488,7 @@ async function saveDshConfig() {
   const btn = document.getElementById('btn-save-dsh');
   btn.disabled = true;
   try {
-    const r = await api('/api/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ checkout: val }),
-    }, 15000);
+    const r = await api('/api/config?checkout=' + encodeURIComponent(val), { method: 'POST' }, 15000);
     appendLogLine(document.getElementById('launch-log'),
       '[' + now() + '] ' + (r.ok ? 'ok      启动路径已保存：' : 'warn    保存失败：') + (r.checkout || r.message || ''));
     if (!r.ok) alert('保存失败：' + (r.message || '未知错误'));

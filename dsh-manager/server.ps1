@@ -698,15 +698,25 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
             '/api/config' {
                 if ($method -eq 'GET') { return New-JsonResp (Get-DshmConfig) }
                 if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
-                $req = $null
-                try { $req = $body | ConvertFrom-Json } catch {}
-                if (-not $req -or $null -eq $req.checkout) { return New-JsonResp @{ error = 'checkout required' } 400 }
-                return New-JsonResp (Save-DshmCheckout ([string]$req.checkout))
+                # 参数优先走查询串（无 body）：部分客户端/代理无法发送请求体
+                $q = Get-Query $rawPath
+                $checkout = if ($q['checkout']) { [string]$q['checkout'] } else { $null }
+                if ($null -eq $checkout -or $checkout -eq '') {
+                    $req = $null
+                    try { $req = $body | ConvertFrom-Json } catch {}
+                    if ($req -and $null -ne $req.checkout) { $checkout = [string]$req.checkout }
+                }
+                if ($null -eq $checkout -or $checkout -eq '') { return New-JsonResp @{ error = 'checkout required' } 400 }
+                return New-JsonResp (Save-DshmCheckout $checkout)
             }
             '/api/pick-directory' {
                 if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
-                $desc = '选择插件文件夹'
-                try { $rq = $body | ConvertFrom-Json; if ($rq -and $rq.desc) { $desc = [string]$rq.desc } } catch {}
+                $q = Get-Query $rawPath
+                $desc = if ($q['desc']) { [string]$q['desc'] } else { '' }
+                if ($desc -eq '') {
+                    try { $rq = $body | ConvertFrom-Json; if ($rq -and $rq.desc) { $desc = [string]$rq.desc } } catch {}
+                }
+                if ($desc -eq '') { $desc = '选择插件文件夹' }
                 return New-JsonResp (Start-FolderPicker $desc)
             }
             '/api/pick-directory-result' {
@@ -756,12 +766,24 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
                         message = 'dsh 服务正在运行，不能安装插件。请先点击「停止服务」关闭 dsh，再安装插件，安装完成后重启 dsh 生效。'
                     } 409
                 }
-                $req = $null
-                try { $req = $body | ConvertFrom-Json } catch {}
-                if (-not $req -or -not $req.profile -or -not $req.spec) { return New-JsonResp @{ error = 'profile/spec required' } 400 }
-                $spec = Get-InstallSpec ([string]$req.source) ([string]$req.spec)
+                # 参数优先走查询串（无 body）：部分客户端/代理无法发送请求体
+                $q = Get-Query $rawPath
+                $pProfile = if ($q['profile']) { [string]$q['profile'] } else { '' }
+                $pSource = if ($q['source']) { [string]$q['source'] } else { '' }
+                $pSpec = if ($q['spec']) { [string]$q['spec'] } else { '' }
+                if ($pSpec -eq '') {
+                    $req = $null
+                    try { $req = $body | ConvertFrom-Json } catch {}
+                    if ($req) {
+                        $pProfile = if ($req.profile) { [string]$req.profile } else { '' }
+                        $pSource = if ($req.source) { [string]$req.source } else { '' }
+                        $pSpec = if ($req.spec) { [string]$req.spec } else { '' }
+                    }
+                }
+                if ($pProfile -eq '' -or $pSpec -eq '') { return New-JsonResp @{ error = 'profile/spec required' } 400 }
+                $spec = Get-InstallSpec $pSource $pSpec
                 if ($spec -eq '') { return New-JsonResp @{ error = 'spec empty' } 400 }
-                if (-not (Start-PluginJob $req.profile @('add', $spec) '安装成功。Web 端插件需重启 dsh 才生效。')) {
+                if (-not (Start-PluginJob $pProfile @('add', $spec) '安装成功。Web 端插件需重启 dsh 才生效。')) {
                     return New-JsonResp @{ ok = $false; message = '已有插件操作在进行中。' } 409
                 }
                 return New-JsonResp @{ ok = $true; message = "开始安装：$spec" }
@@ -775,28 +797,47 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
                         message = 'dsh 服务正在运行，不能卸载插件。请先点击「停止服务」关闭 dsh，再卸载插件，卸载完成后重启 dsh 生效。'
                     } 409
                 }
-                $req = $null
-                try { $req = $body | ConvertFrom-Json } catch {}
-                if (-not $req -or -not $req.profile -or -not $req.name) { return New-JsonResp @{ error = 'profile/name required' } 400 }
+                $q = Get-Query $rawPath
+                $pProfile = if ($q['profile']) { [string]$q['profile'] } else { '' }
+                $pName = if ($q['name']) { [string]$q['name'] } else { '' }
+                if ($pName -eq '') {
+                    $req = $null
+                    try { $req = $body | ConvertFrom-Json } catch {}
+                    if ($req) {
+                        $pProfile = if ($req.profile) { [string]$req.profile } else { '' }
+                        $pName = if ($req.name) { [string]$req.name } else { '' }
+                    }
+                }
+                if ($pProfile -eq '' -or $pName -eq '') { return New-JsonResp @{ error = 'profile/name required' } 400 }
                 # 卸载视觉插件：命令成功后删除其本地配置文件（$DSH_HOME\vision-config.json）
                 $cleanup = ''
-                if ([string]$req.name -eq '@uachar/dsh-vision-plugin') {
+                if ($pName -eq '@uachar/dsh-vision-plugin') {
                     $vHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
                     $vCfg = Join-Path $vHome 'vision-config.json'
                     $cleanup = "Remove-Item -LiteralPath '$vCfg' -Force -ErrorAction SilentlyContinue; PLog 'info 已删除视觉插件本地配置文件：$vCfg'"
                 }
-                if (-not (Start-PluginJob $req.profile @('remove', [string]$req.name) '卸载完成。Web 端需重启 dsh 生效。' $cleanup)) {
+                if (-not (Start-PluginJob $pProfile @('remove', $pName) '卸载完成。Web 端需重启 dsh 生效。' $cleanup)) {
                     return New-JsonResp @{ ok = $false; message = '已有插件操作在进行中。' } 409
                 }
-                return New-JsonResp @{ ok = $true; message = "开始卸载：$($req.name)" }
+                return New-JsonResp @{ ok = $true; message = "开始卸载：$pName" }
             }
             '/api/plugins/toggle' {
                 if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
-                $req = $null
-                try { $req = $body | ConvertFrom-Json } catch {}
-                if (-not $req -or -not $req.profile -or -not $req.name) { return New-JsonResp @{ error = 'profile/name/enable required' } 400 }
-                $enable = [bool]$req.enable
-                return New-JsonResp (Set-PluginEnabled $req.profile ([string]$req.name) $enable)
+                $q = Get-Query $rawPath
+                $pProfile = if ($q['profile']) { [string]$q['profile'] } else { '' }
+                $pName = if ($q['name']) { [string]$q['name'] } else { '' }
+                $enable = ($q['enable'] -eq 'true')
+                if ($q['enable'] -eq $null) {
+                    $req = $null
+                    try { $req = $body | ConvertFrom-Json } catch {}
+                    if ($req) {
+                        $pProfile = if ($req.profile) { [string]$req.profile } else { '' }
+                        $pName = if ($req.name) { [string]$req.name } else { '' }
+                        if ($null -ne $req.enable) { $enable = [bool]$req.enable }
+                    }
+                }
+                if ($pProfile -eq '' -or $pName -eq '') { return New-JsonResp @{ error = 'profile/name/enable required' } 400 }
+                return New-JsonResp (Set-PluginEnabled $pProfile $pName $enable)
             }
 
             default { return New-JsonResp @{ error = "not found: $path" } 404 }
@@ -862,11 +903,20 @@ function Handle-Client($client) {
             } catch {}
         }
         if ($contentLength -gt 0) {
-            while ($body.Length -lt $contentLength) {
-                $n = $stream.Read($buf, 0, $buf.Length)
-                if ($n -le 0) { break }
-                $body += [System.Text.Encoding]::UTF8.GetString($buf, 0, $n)
+            # 请求体读取：给 2 秒宽限。部分客户端/代理可能迟迟不发送 body，
+            # 超时后按已收到的内容继续处理（路由对缺失参数返回明确的错误），
+            # 而不是无限等待导致前端 Failed to fetch。
+            try {
+                $stream.ReadTimeout = 2000
+                while ($body.Length -lt $contentLength) {
+                    $n = $stream.Read($buf, 0, $buf.Length)
+                    if ($n -le 0) { break }
+                    $body += [System.Text.Encoding]::UTF8.GetString($buf, 0, $n)
+                }
+            } catch {
+                Req-Log ("BODY 未收全（声明 $contentLength 字节，实际 $($body.Length)），按已收到内容继续。")
             }
+            $stream.ReadTimeout = 5000
         }
         $resp = Route-Request $method $rawPath $body
         Send-Response $stream $resp
@@ -968,6 +1018,7 @@ while ($true) {
 Mgr-Log 'info' '面板已按请求退出，端口已释放。'
 try { $listener.Stop() } catch {}
 exit 0
+
 
 
 
