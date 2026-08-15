@@ -632,13 +632,23 @@ function New-FileResp([string]$path, [string]$type) {
     return [pscustomobject]@{ code = 200; type = $type; data = $data }
 }
 
+# 面板首页：注入本面板 API 基地址（实际监听地址），前端用绝对地址调用 API
+function Get-PanelPage {
+    $resp = New-FileResp (Join-Path $script:Here 'index.html') 'text/html; charset=utf-8'
+    if ($resp.code -eq 200) {
+        $resp.data = $resp.data.Replace('__API_BASE__', $script:ManagerUrl)
+    }
+    return $resp
+}
+
 function Send-Response($stream, $resp) {
     $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$resp.data)
     $reason = switch ([int]$resp.code) {
         200 { 'OK' } 400 { 'Bad Request' } 404 { 'Not Found' } 409 { 'Conflict' } 500 { 'Internal Server Error' }
         default { 'OK' }
     }
-    $head = "HTTP/1.1 $($resp.code) $reason`r`nContent-Type: $($resp.type)`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`nCache-Control: no-store`r`n`r`n"
+    # 本地工具放宽 CORS：页面即使从 localhost 或回退端口加载，也能访问本面板 API
+    $head = "HTTP/1.1 $($resp.code) $reason`r`nContent-Type: $($resp.type)`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`nAccess-Control-Allow-Origin: *`r`nAccess-Control-Allow-Methods: GET, POST, OPTIONS`r`nAccess-Control-Allow-Headers: Content-Type`r`nCache-Control: no-store`r`n`r`n"
     try {
         $headBytes = [System.Text.Encoding]::UTF8.GetBytes($head)
         $stream.Write($headBytes, 0, $headBytes.Length)
@@ -661,10 +671,14 @@ function Get-Query([string]$rawPath) {
 
 function Route-Request([string]$method, [string]$rawPath, [string]$body) {
     $path = ($rawPath -split '\?')[0]
+    # CORS 预检：浏览器在跨域 POST 前会先发 OPTIONS，一律直接放行
+    if ($method -eq 'OPTIONS') {
+        return New-JsonResp @{ ok = $true } 200
+    }
     try {
         switch ($path) {
-            '/' { return New-FileResp (Join-Path $script:Here 'index.html') 'text/html; charset=utf-8' }
-            '/index.html' { return New-FileResp (Join-Path $script:Here 'index.html') 'text/html; charset=utf-8' }
+            '/' { return Get-PanelPage }
+            '/index.html' { return Get-PanelPage }
             '/app.js' { return New-FileResp (Join-Path $script:Here 'app.js') 'application/javascript; charset=utf-8' }
 
             '/api/status' {
@@ -914,6 +928,7 @@ while ($true) {
         Start-Sleep -Milliseconds 200
     }
 }
+
 
 
 

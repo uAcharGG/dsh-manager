@@ -22,16 +22,21 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+// API 基地址：由面板首页注入（本面板实际监听地址）。用绝对地址 + 后端 CORS，
+// 页面即使从 localhost 或其他端口加载，也能访问到本面板的 API。
+const API_BASE = window.DSHM_API || '';
+
 // 带超时的 API 请求：轮询类 3s 快速失败；操作类（启动/停止/重启/安装/卸载）传较长时间
 async function api(path, opts, timeoutMs) {
   const ms = timeoutMs || 3000;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
+  const url = API_BASE + path;
   try {
-    const res = await fetch(path, Object.assign({}, opts, { signal: ctrl.signal }));
+    const res = await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
     if (!res.ok) {
       const t = await res.text().catch(() => '');
-      throw new Error(path + ' -> ' + res.status + ' ' + t);
+      throw new Error(url + ' -> ' + res.status + ' ' + t);
     }
     return res.json();
   } finally {
