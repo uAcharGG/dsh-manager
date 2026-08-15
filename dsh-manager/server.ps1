@@ -564,10 +564,21 @@ function Start-FolderPicker([string]$desc = '选择插件文件夹') {
     Remove-Item $resultFile -Force -ErrorAction SilentlyContinue
     $inner = @'
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
+Add-Type -AssemblyName System.Drawing | Out-Null
 $f = New-Object System.Windows.Forms.FolderBrowserDialog
 $f.Description = '__DESC__'
 $f.ShowNewFolderButton = $false
-$r = $f.ShowDialog()
+# 隐藏的置顶宿主窗口：对话框以它为 owner，从而保持在所有普通窗口之上（置顶）
+$owner = New-Object System.Windows.Forms.Form
+$owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+$owner.ShowInTaskbar = $false
+$owner.TopMost = $true
+$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+$owner.Location = New-Object System.Drawing.Point(-32000, -32000)
+$owner.Size = New-Object System.Drawing.Size(1, 1)
+$owner.Show()
+$r = $f.ShowDialog($owner)
+$owner.Close()
 if ($r -eq [System.Windows.Forms.DialogResult]::OK) {
     [System.IO.File]::WriteAllText($env:TEMP + '\dsh-picker-result.txt', $f.SelectedPath, (New-Object System.Text.UTF8Encoding($false)))
 } else {
@@ -1018,6 +1029,7 @@ while ($true) {
 Mgr-Log 'info' '面板已按请求退出，端口已释放。'
 try { $listener.Stop() } catch {}
 exit 0
+
 
 
 
