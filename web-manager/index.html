@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek Harness 管理面板</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #1c2128;
+    --bg-hover: #21262d;
+    --bg-active: #30363d;
+    --border: #30363d;
+    --border-hover: #484f58;
+    --text-primary: #c9d1d9;
+    --text-secondary: #8b949e;
+    --text-tertiary: #6e7681;
+    --text-quaternary: #484f58;
+    --accent: #58a6ff;
+    --positive: #3fb950;
+    --danger: #f85149;
+    --warning: #d29922;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+    --t-fast: 150ms;
+    --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: var(--font-sans);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 40px 20px;
+  }
+  .ds-panel {
+    display: flex;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    min-height: 600px;
+    width: 100%;
+    max-width: 960px;
+    background: var(--bg-primary);
+  }
+  .ds-sidebar {
+    width: 180px;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 12px 8px;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .ds-sidebar-title {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-quaternary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 8px 12px 4px;
+  }
+  .ds-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text-secondary);
+    transition: background var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out);
+    user-select: none;
+  }
+  .ds-nav-item:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .ds-nav-item.active {
+    background: var(--bg-active);
+    color: var(--text-primary);
+  }
+  .ds-nav-item svg {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+  }
+  .ds-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-primary);
+    min-width: 0;
+  }
+  .ds-header {
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .ds-header h2 {
+    font-size: 17px;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin: 0;
+  }
+  .ds-header .ds-status {
+    font-size: 12px;
+    color: var(--text-quaternary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .ds-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--positive);
+  }
+  .ds-status-dot.offline {
+    background: var(--text-quaternary);
+  }
+  .ds-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    gap: 20px;
+    overflow: auto;
+  }
+  .ds-section {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .ds-section-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin: 0 0 12px 0;
+  }
+  .ds-section-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 12px 0;
+  }
+  .ds-section-title-row .ds-section-title {
+    margin: 0;
+  }
+  .ds-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    transition: background var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out), opacity var(--t-fast) var(--ease-out);
+    font-family: var(--font-sans);
+  }
+  .ds-btn:hover {
+    background: var(--bg-active);
+    border-color: var(--border-hover);
+  }
+  .ds-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .ds-btn:disabled:hover {
+    background: var(--bg-hover);
+    border-color: var(--border);
+  }
+  .ds-btn.primary {
+    background: var(--text-primary);
+    color: var(--bg-primary);
+    border-color: var(--text-primary);
+  }
+  .ds-btn.primary:hover {
+    opacity: 0.9;
+  }
+  .ds-btn.danger {
+    background: rgba(248, 81, 73, 0.12);
+    color: var(--danger);
+    border-color: rgba(248, 81, 73, 0.25);
+  }
+  .ds-btn.danger:hover {
+    background: rgba(248, 81, 73, 0.2);
+  }
+  .ds-btn.ghost {
+    background: transparent;
+    border-color: transparent;
+    padding: 6px 10px;
+  }
+  .ds-btn.ghost:hover {
+    background: var(--bg-hover);
+  }
+  .ds-btn.small {
+    font-size: 12px;
+    padding: 4px 10px;
+  }
+  .ds-btn-group {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .ds-scrollbox {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .ds-scrollbox::-webkit-scrollbar { width: 8px; }
+  .ds-scrollbox::-webkit-scrollbar-track { background: transparent; }
+  .ds-scrollbox::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  .ds-scrollbox::-webkit-scrollbar-thumb:hover { background: var(--text-quaternary); }
+
+  .ds-log {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 12px;
+    max-height: 280px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  .ds-log .log-time { color: var(--text-quaternary); }
+  .ds-log .log-info { color: var(--accent); }
+  .ds-log .log-success { color: var(--positive); }
+  .ds-log .log-error { color: var(--danger); }
+  .ds-log .log-warn { color: var(--warning); }
+
+  .ds-addr-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+  .ds-addr-label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-bottom: 2px;
+  }
+  .ds-addr-value {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+  }
+  .ds-addr-value:hover { text-decoration: underline; }
+  .ds-addr-value.offline {
+    color: var(--text-quaternary);
+    text-decoration: line-through;
+    cursor: default;
+  }
+  .ds-addr-value.offline:hover { text-decoration: line-through; }
+
+  .ds-plugin-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+  .ds-plugin-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    transition: background var(--t-fast) var(--ease-out);
+    flex-shrink: 0;
+    gap: 12px;
+  }
+  .ds-plugin-row:hover {
+    background: var(--bg-active);
+  }
+  .ds-plugin-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .ds-plugin-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    word-break: break-all;
+  }
+  .ds-plugin-desc {
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+  .ds-plugin-source {
+    font-size: 11px;
+    color: var(--text-quaternary);
+    font-family: var(--font-mono);
+    word-break: break-all;
+  }
+  .ds-plugin-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .ds-plugin-locked {
+    font-size: 11px;
+    color: var(--text-quaternary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 8px;
+  }
+  .ds-plugin-empty {
+    color: var(--text-tertiary);
+    font-size: 13px;
+    padding: 12px;
+    text-align: center;
+  }
+  .ds-toggle {
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: var(--border);
+    position: relative;
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease-out);
+    flex-shrink: 0;
+  }
+  .ds-toggle.on {
+    background: var(--positive);
+  }
+  .ds-toggle::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--bg-primary);
+    top: 2px;
+    left: 2px;
+    transition: transform var(--t-fast) var(--ease-out);
+  }
+  .ds-toggle.on::after {
+    transform: translateX(16px);
+  }
+  .ds-toggle:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .ds-install-bar {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .ds-select {
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    outline: none;
+    min-width: 120px;
+  }
+  .ds-select:focus {
+    border-color: var(--border-hover);
+  }
+  .ds-select.small {
+    font-size: 12px;
+    padding: 4px 8px;
+    min-width: 90px;
+  }
+  .ds-input {
+    flex: 1;
+    min-width: 180px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: var(--font-sans);
+    outline: none;
+  }
+  .ds-input::placeholder {
+    color: var(--text-quaternary);
+  }
+  .ds-input:focus {
+    border-color: var(--border-hover);
+  }
+  .ds-label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-right: 6px;
+  }
+
+  .ds-hidden { display: none; }
+  .ds-busy-hint { color: var(--warning); font-size: 12px; }
+</style>
+<base target="_blank">
+</head>
+<body>
+
+<div class="ds-panel">
+  <div class="ds-sidebar">
+    <div class="ds-sidebar-title">deepseek harness</div>
+    <div class="ds-nav-item active" data-tab="launch" onclick="switchTab('launch')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      一键启动
+    </div>
+    <div class="ds-nav-item" data-tab="plugins" onclick="switchTab('plugins')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+      插件管理
+    </div>
+  </div>
+
+  <div class="ds-main">
+    <div class="ds-header">
+      <h2 id="page-title">一键启动</h2>
+      <div class="ds-status">
+        <span class="ds-status-dot" id="status-dot"></span>
+        <span id="status-text">检测中...</span>
+      </div>
+    </div>
+
+    <div class="ds-content">
+      <!-- 一键启动面板 -->
+      <div id="tab-launch">
+        <div class="ds-section">
+          <h3 class="ds-section-title">服务控制</h3>
+          <div class="ds-btn-group">
+            <button class="ds-btn primary" id="btn-start" onclick="startService()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              启动服务
+            </button>
+            <button class="ds-btn" id="btn-stop" onclick="stopService()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+              停止服务
+            </button>
+            <button class="ds-btn" id="btn-restart" onclick="restartService()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+              重启服务
+            </button>
+          </div>
+          <div class="ds-addr-card">
+            <div>
+              <div class="ds-addr-label">服务地址</div>
+              <div class="ds-addr-value offline" id="service-addr" title="点击打开">—</div>
+            </div>
+            <button class="ds-btn ghost" onclick="copyAddr()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              复制
+            </button>
+          </div>
+        </div>
+
+        <div class="ds-section">
+          <h3 class="ds-section-title">运行日志</h3>
+          <div class="ds-log ds-scrollbox" id="launch-log"></div>
+        </div>
+      </div>
+
+      <!-- 插件管理面板 -->
+      <div id="tab-plugins" class="ds-hidden">
+        <div class="ds-section">
+          <h3 class="ds-section-title">安装新插件</h3>
+          <div class="ds-install-bar">
+            <select class="ds-select" id="install-source">
+              <option value="npm">npm 包</option>
+              <option value="local">本地路径</option>
+              <option value="git">git 仓库</option>
+              <option value="tarball">tarball</option>
+            </select>
+            <input class="ds-input" id="install-input" type="text" placeholder="输入 npm 包名，如：deepseek-r1-connector" />
+            <button class="ds-btn ghost" id="btn-pick-folder" onclick="pickLocalFolder()" title="选择本地插件文件夹">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+            </button>
+            <button class="ds-btn primary" id="btn-install" onclick="installPlugin()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              安装
+            </button>
+          </div>
+          <div id="install-busy" class="ds-hidden ds-busy-hint" style="margin-top:8px;">插件操作执行中，完成后自动刷新列表...</div>
+        </div>
+
+        <div class="ds-section">
+          <div class="ds-section-title-row">
+            <h3 class="ds-section-title">已安装插件</h3>
+            <div>
+              <label class="ds-label" for="profile-select">Profile</label>
+              <select class="ds-select small" id="profile-select" onchange="refreshPlugins()"></select>
+              <button class="ds-btn ghost small" onclick="refreshPlugins()">刷新</button>
+            </div>
+          </div>
+          <div class="ds-plugin-list ds-scrollbox" id="plugin-list"></div>
+        </div>
+
+        <div class="ds-section">
+          <h3 class="ds-section-title">插件日志</h3>
+          <div class="ds-log ds-scrollbox" id="plugin-log"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

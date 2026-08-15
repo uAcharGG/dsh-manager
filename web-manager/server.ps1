@@ -1,0 +1,810 @@
+﻿# web-manager/server.ps1 — DSH 管理面板后端（本地 HTTP 服务 + 全部管理动作）
+#
+# 用 TcpListener 实现的最小 HTTP 服务器（不依赖 http.sys，无需管理员 URL ACL），
+# 在 http://127.0.0.1:<ManagerPort>/ 提供管理面板 UI 与 REST API：
+#
+#   GET  /                        -> index.html
+#   GET  /app.js                  -> 前端脚本
+#   GET  /api/status              -> { running, url, port, managerUrl, pluginBusy }
+#   GET  /api/profiles            -> ['web','headless']
+#   GET  /api/plugins?profile=web -> 已装插件列表（含版本/描述/启停/锁定）
+#   GET  /api/logs?log=launch|plugin&cursor=N -> 增量日志行
+#   POST /api/start               -> 一键启动（就绪后由前端打开浏览器）
+#   POST /api/stop                -> 一键停止（结束服务及全部相关进程）
+#   POST /api/restart             -> 重启
+#   POST /api/plugins/install     -> { profile, source, spec } 异步安装
+#   POST /api/plugins/uninstall   -> { profile, name } 异步卸载
+#   POST /api/plugins/toggle      -> { profile, name, enable } 启/停用（编辑组合层）
+#   POST /api/pick-directory      -> 打开原生文件夹选择对话框，返回所选绝对路径（取消返回空）
+#
+# 运行：双击 dsh-manager.cmd（会启动本服务并自动打开浏览器）
+# 兼容：Windows PowerShell 5.1 / PowerShell 7+。
+
+param(
+    [int]$ManagerPort = 3399,
+    [int]$Port = 3080,
+    [string]$Checkout = 'D:\AI\DeepSeekHarness\deepseek-harness',
+    [switch]$NoBrowser
+)
+
+$script:Port = $Port
+$script:Url = "http://127.0.0.1:$Port"
+$script:Checkout = $Checkout
+$script:Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:ManagerUrl = "http://127.0.0.1:$ManagerPort"
+$global:DSHManagerCrashLog = Join-Path $script:Here 'server-crash.log'
+$script:LaunchLog = Join-Path $env:TEMP 'dsh-manager-launch.log'
+$script:PluginLog = Join-Path $env:TEMP 'dsh-manager-plugin.log'
+Remove-Item $script:LaunchLog, $script:PluginLog -Force -ErrorAction SilentlyContinue
+$script:PluginBusy = $false
+$script:PluginJob = $null
+
+function Write-Crash([string]$context, $errorRecord) {
+    try {
+        $msg = "[{0}] {1}: {2}`n{3}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $context, $errorRecord.Exception.Message, $errorRecord.ScriptStackTrace
+        Add-Content -Path $global:DSHManagerCrashLog -Value $msg -Encoding UTF8
+    } catch {}
+}
+trap { Write-Crash 'TRAP' $_; continue }
+
+# ── 日志（写文件 + 控制台）──────────────────────────────────────────────────
+
+# 运行日志：dsh 服务输出 + 管理动作（level: info/ok/warn/error）
+function Mgr-Log([string]$level, [string]$text) {
+    $line = "[{0}] {1} [dsh] {2}" -f (Get-Date -Format 'HH:mm:ss'), $level, $text
+    try { Add-Content -Path $script:LaunchLog -Value $line -Encoding UTF8 } catch {}
+    Write-Host $line
+}
+# 插件日志
+function Plugin-Log([string]$level, [string]$text) {
+    $line = "[{0}] {1} {2}" -f (Get-Date -Format 'HH:mm:ss'), $level, $text
+    try { Add-Content -Path $script:PluginLog -Value $line -Encoding UTF8 } catch {}
+    Write-Host $line
+}
+
+# ── 端口 / 进程 ─────────────────────────────────────────────────────────────
+
+function Test-DshPort([int]$p) {
+    try {
+        $null -ne (Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction Stop)
+    } catch {
+        return $false
+    }
+}
+
+function Get-DshListener([int]$p) {
+    try {
+        $c = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction Stop
+        return $c
+    } catch {
+        return $null
+    }
+}
+
+# 收集所有与 dsh 相关的进程 PID：监听端口 + 命令行匹配 + 父进程链（止步于系统进程）
+# 注意：绝不能用 $pid 作变量名（PowerShell 只读自动变量）。
+function Get-DshProcessIds {
+    $ids = New-Object 'System.Collections.Generic.HashSet[int]'
+    $conn = @(Get-DshListener $Port)
+    foreach ($c in $conn) {
+        if ($c.OwningProcess -gt 0) { [void]$ids.Add([int]$c.OwningProcess) }
+    }
+    try {
+        $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    } catch {
+        $procs = @()
+    }
+    $binPat = 'apps[\\/]cli[\\/]lib[\\/]bin\.js'
+    foreach ($p in $procs) {
+        if ($null -eq $p) { continue }
+        $cl = $p.CommandLine
+        if (-not $cl) { continue }
+        $isDshBin = ($cl -match $binPat) -and ($cl -match '\bweb\b')
+        $isDshCli = ($cl -match '\bdsh\b') -and ($cl -match '\bweb\b') -and ($cl -match ('--port\s+' + $Port))
+        if ($isDshBin -or $isDshCli) { [void]$ids.Add([int]$p.ProcessId) }
+    }
+    $map = @{}
+    foreach ($p in $procs) {
+        if ($null -eq $p) { continue }
+        $map[[int]$p.ProcessId] = [pscustomobject]@{ Name = $p.Name; Parent = [int]$p.ParentProcessId; Cmd = $p.CommandLine }
+    }
+    $protect = @('explorer', 'dwm', 'winlogon', 'csrss', 'services', 'svchost', 'lsass', 'wininit', 'fontdrvhost', 'taskhostw')
+    foreach ($seed in @($ids)) {
+        $cur = $seed
+        for ($i = 0; $i -lt 8; $i++) {
+            if (-not $map.ContainsKey($cur)) { break }
+            $parent = $map[$cur].Parent
+            if ($parent -le 4 -or $parent -eq $cur) { break }
+            if (-not $map.ContainsKey($parent)) { break }
+            $parName = $map[$parent].Name.ToLower()
+            if ($protect -contains $parName) { break }
+            $parCmd = $map[$parent].Cmd
+            # 绝不结束本面板自身（server.ps1 / web-manager / dsh-manager）
+            if ($parCmd -match 'dsh-manager|server\.ps1|web-manager') { break }
+            $isConsoleHost = [string]::IsNullOrWhiteSpace($parCmd)
+            $isDshShell = ($parCmd -match $binPat) -or ($parCmd -match '\bdsh\b')
+            if (-not ($isConsoleHost -or $isDshShell)) { break }
+            [void]$ids.Add($parent)
+            $cur = $parent
+        }
+    }
+    return @($ids)
+}
+
+# ── Profile / 插件 ─────────────────────────────────────────────────────────
+
+function Get-ProfileDir([string]$profile) {
+    $homeDir = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+    return Join-Path (Join-Path $homeDir 'profiles') $profile
+}
+
+function Resolve-PluginMeta([string]$name, [string]$spec, [string]$profileDir) {
+    $candidates = @()
+    if ($spec -match '^(?:link|file):(.+)$') {
+        $p = $matches[1] -replace '/{2,}', '/'
+        if (Test-Path $p) { $candidates += (Join-Path $p 'package.json') }
+    }
+    $nm = Join-Path $profileDir 'node_modules'
+    if (Test-Path $nm) {
+        $p2 = Join-Path $nm ($name -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        if (Test-Path $p2) { $candidates += (Join-Path $p2 'package.json') }
+    }
+    foreach ($c in $candidates) {
+        if (Test-Path $c) {
+            try {
+                $j = Get-Content $c -Raw | ConvertFrom-Json
+                return [pscustomobject]@{ Version = [string]$j.version; Description = [string]$j.description }
+            } catch {}
+        }
+    }
+    return [pscustomobject]@{ Version = $spec; Description = '' }
+}
+
+# 解析插件包目录（link:/file: 指向的本地目录，或 profile node_modules 下的包）
+function Get-PackageDir([string]$name, [string]$spec, [string]$profileDir) {
+    if ($spec -match '^(?:link|file):(.+)$') {
+        $p = ($matches[1] -replace '/{2,}', '/')
+        if (Test-Path $p) { return $p }
+    }
+    $p2 = Join-Path (Join-Path $profileDir 'node_modules') ($name -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+    if (Test-Path $p2) { return $p2 }
+    return $null
+}
+
+# 从插件包 README 提取第一段功能描述（跳过标题/空行/代码围栏，清理行内标记，截断）
+function Get-PackageReadme([string]$dir) {
+    if (-not $dir) { return $null }
+    foreach ($rel in @('README.md', 'readme.md', 'README.MD')) {
+        $f = Join-Path $dir $rel
+        if (-not (Test-Path $f)) { continue }
+        try {
+            $text = [System.IO.File]::ReadAllText($f, [System.Text.Encoding]::UTF8)
+        } catch { continue }
+        foreach ($raw in ($text -split "`r?`n")) {
+            $line = $raw.Trim()
+            if ($line -eq '') { continue }
+            if ($line -match '^#{1,6}\s') { continue }          # 标题
+            if ($line -match '^```' -or $line -match '^\s*\|') { continue }  # 代码围栏 / 表格
+            if ($line -match '^[-*]\s') { continue }             # 列表项
+            # 清理常见 Markdown 行内标记
+            $clean = $line -replace '\*\*', '' -replace '__', '' -replace '`', ''
+            $clean = [regex]::Replace($clean, '\[([^\]]*)\]\([^)]*\)', '$1')
+            $clean = $clean.Trim()
+            if ($clean -eq '') { continue }
+            if ($clean.Length -gt 200) { $clean = $clean.Substring(0, 197).TrimEnd() + '...' }
+            return $clean
+        }
+    }
+    return $null
+}
+
+function Get-InstalledPlugins([string]$profile) {
+    $profileDir = Get-ProfileDir $profile
+    $manifestPath = Join-Path $profileDir 'package.json'
+    if (-not (Test-Path $manifestPath)) { return @() }
+    try {
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json
+    } catch {
+        return @()
+    }
+    $bundles = @()
+    if ($m.dsh -and $m.dsh.profile -and $m.dsh.profile.bundles) {
+        $bundles = @($m.dsh.profile.bundles)
+    }
+    $deps = @()
+    if ($m.dependencies) {
+        $deps = @($m.dependencies.PSObject.Properties | ForEach-Object {
+            [pscustomobject]@{ Name = $_.Name; Spec = $_.Value }
+        })
+    }
+    # 注意：JSON 键必须用 camelCase（前端 JS 区分大小写，读的是 p.name 等小写键）
+    $rows = @()
+    foreach ($b in $bundles) {
+        $dep = $deps | Where-Object { $_.Name -eq $b } | Select-Object -First 1
+        if (-not $dep) {
+            $rows += [pscustomobject]@{
+                name = $b; version = ''; description = '内置模板组合包'
+                enabled = $true; locked = $true; kind = 'template'
+            }
+        }
+    }
+    foreach ($d in $deps) {
+        $inBundles = $bundles -contains $d.Name
+        $info = Resolve-PluginMeta $d.Name $d.Spec $profileDir
+        $pkgDir = Get-PackageDir $d.Name $d.Spec $profileDir
+        # 文件来源：link:/file: 指向的本地目录，否则显示声明（npm 包名等）
+        $source = ''
+        if ($d.Spec -match '^(?:link|file):(.+)$') {
+            $source = ($matches[1] -replace '/{2,}', '/').TrimEnd('\', '/')
+        } elseif ($d.Spec -match '^(workspace|portal|link):') {
+            $source = $d.Spec
+        } else {
+            $source = $d.Spec
+        }
+        $rows += [pscustomobject]@{
+            name = $d.Name; version = $info.Version; description = $info.Description
+            readme = (Get-PackageReadme $pkgDir)
+            source = $source
+            enabled = $inBundles; locked = $false
+            kind = if ($inBundles) { 'loaded' } else { 'disabled' }
+        }
+    }
+    return @($rows)
+}
+
+function Set-PluginEnabled([string]$profile, [string]$name, [bool]$enable) {
+    $profileDir = Get-ProfileDir $profile
+    $manifestPath = Join-Path $profileDir 'package.json'
+    if (-not (Test-Path $manifestPath)) {
+        Plugin-Log 'error' "找不到 profile 清单：$manifestPath"
+        return @{ ok = $false; message = "找不到 profile 清单：$manifestPath" }
+    }
+    try {
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json
+    } catch {
+        Plugin-Log 'error' "读取 profile 清单失败：$($_.Exception.Message)"
+        return @{ ok = $false; message = $_.Exception.Message }
+    }
+    if (-not $m.dsh) { $m | Add-Member -NotePropertyName dsh -NotePropertyValue ([pscustomobject]@{}) }
+    if (-not $m.dsh.profile) { $m.dsh | Add-Member -NotePropertyName profile -NotePropertyValue ([pscustomobject]@{}) }
+    $bundles = @()
+    if ($m.dsh.profile.bundles) { $bundles = @($m.dsh.profile.bundles) }
+    $inBundles = $bundles -contains $name
+    if ($enable -and -not $inBundles) {
+        $bundles += $name
+        $m.dsh.profile.bundles = @($bundles)
+    } elseif (-not $enable -and $inBundles) {
+        $m.dsh.profile.bundles = @($bundles | Where-Object { $_ -ne $name })
+    } else {
+        Plugin-Log 'info' "$name 已处于目标状态。"
+        return @{ ok = $true; message = "$name 已处于目标状态。" }
+    }
+    try {
+        $json = $m | ConvertTo-Json -Depth 12
+        [System.IO.File]::WriteAllText($manifestPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Plugin-Log 'error' "写入 profile 清单失败：$($_.Exception.Message)"
+        return @{ ok = $false; message = $_.Exception.Message }
+    }
+    $action = if ($enable) { '启用' } else { '停用' }
+    Plugin-Log 'ok' "$action $name —— 重启 dsh 后生效。"
+    Plugin-Log 'info' '提示：之后若用 dsh plugin add/remove 命令操作插件，可能恢复该插件的组合层状态。'
+    return @{ ok = $true; message = "已$action $name，重启 dsh 后生效。" }
+}
+
+# 根据来源类型构造安装 spec（前端 value：npm/local/git/tarball；兼容中文标签）
+function Get-InstallSpec([string]$source, [string]$value) {
+    $value = $value.Trim()
+    $isLocal = ($source -eq 'local') -or ($source -eq '本地路径')
+    if ($isLocal) {
+        if ($value -match '^(link|file):') { return $value }
+        return 'link:' + $value
+    }
+    return $value
+}
+
+# 异步插件命令（后台 job，输出实时写入插件日志）
+# 与老实现同款命令：pnpm dsh plugin --profile <profile> add/remove <spec>（cwd=checkout）
+function Start-PluginJob([string]$profile, [string[]]$pnpmArgs, [string]$doneLabel) {
+    if ($script:PluginBusy) { return $false }
+    # 服务端解析 pnpm 全路径并传给 job，避免 job 内 PATH 解析不一致
+    $pnpmPath = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
+    if (-not $pnpmPath) {
+        Plugin-Log 'error' '找不到 pnpm（PATH 中无 pnpm.cmd），无法执行安装/卸载。'
+        return $false
+    }
+    $script:PluginBusy = $true
+    $logFile = $script:PluginLog
+    $checkout = $script:Checkout
+    $dshHome = $env:DSH_HOME
+    # 参数用单元分隔符序列化，规避 Start-Job -ArgumentList 对数组的展开差异
+    $argsJoined = @($pnpmArgs | ForEach-Object { $_ }) -join [string][char]0x241F
+    try {
+        $script:PluginJob = Start-Job -ArgumentList $profile, $argsJoined, $logFile, $checkout, $pnpmPath, $dshHome, $doneLabel -ScriptBlock {
+            param($profile, $argsJoined, $logFile, $checkout, $pnpmPath, $dshHome, $doneLabel)
+            if ($dshHome) { $env:DSH_HOME = $dshHome }
+            function PLog($t) { try { Add-Content -Path $logFile -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $t) -Encoding UTF8 } catch {} }
+            $pnpmArgs = @($argsJoined -split [string][char]0x241F)
+            # 每个参数加引号，避免路径含空格时命令被截断
+            $quoted = @($pnpmArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '
+            PLog "info 开始执行：pnpm dsh plugin --profile $profile $($pnpmArgs -join ' ')"
+            $cmdLine = 'call "' + $pnpmPath + '" dsh plugin --profile ' + $profile + ' ' + $quoted
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "$env:COMSPEC"
+            $psi.Arguments = '/d /s /c "' + $cmdLine + ' >> "' + $logFile + '" 2>&1"'
+            $psi.WorkingDirectory = $checkout
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $proc = New-Object System.Diagnostics.Process
+            $proc.StartInfo = $psi
+            $code = 1
+            try {
+                if ($proc.Start()) { $proc.WaitForExit(); $code = $proc.ExitCode }
+            } catch {
+                PLog "error 启动命令失败：$($_.Exception.Message)"
+            }
+            try { $proc.Dispose() } catch {}
+            PLog "info 命令完成，退出码 $code"
+            if ($code -eq 0) { PLog "ok $doneLabel" }
+        }
+    } catch {
+        # Start-Job 自身失败：立即复位 busy，避免前端永久显示"安装中"
+        $script:PluginBusy = $false
+        $script:PluginJob = $null
+        Plugin-Log 'error' "启动后台插件命令失败：$($_.Exception.Message)"
+        return $false
+    }
+    return $true
+}
+
+# 回收已结束的插件 job
+function Reap-PluginJob {
+    if ($script:PluginJob) {
+        try {
+            if ($script:PluginJob.State -ne 'Running') {
+                try { Receive-Job $script:PluginJob | Out-Null } catch {}
+                try { Remove-Job $script:PluginJob -Force } catch {}
+                $script:PluginJob = $null
+                $script:PluginBusy = $false
+            }
+        } catch {}
+    }
+}
+
+# ── 启动 / 停止 / 重启 ─────────────────────────────────────────────────────
+
+function Get-LatestSourceTime([string]$root) {
+    $raw = & git -C $root ls-files '*.ts' '*.tsx' '*.yml' '*.yaml' 2>$null
+    $latest = [datetime]::MinValue
+    foreach ($rel in $raw) {
+        if ($rel -match 'node_modules|/lib/|/dist/|\.git') { continue }
+        $f = Join-Path $root $rel
+        if (Test-Path $f) {
+            $t = (Get-Item $f).LastWriteTime
+            if ($t -gt $latest) { $latest = $t }
+        }
+    }
+    return $latest
+}
+
+function Get-LaunchCommand {
+    $libBin = Join-Path $Checkout 'apps\cli\lib\bin.js'
+    $artifact = if (Test-Path $libBin) { Get-Item $libBin } else { $null }
+    if (-not $artifact) {
+        Mgr-Log 'warn' '构建产物缺失（apps/cli/lib/bin.js），回退 tsx 慢路径（建议先 pnpm run build）。'
+        return @{ File = 'pnpm.cmd'; Args = @('dsh', 'web') }
+    }
+    $stale = $false
+    $latestSrc = Get-LatestSourceTime $Checkout
+    if ($latestSrc -gt $artifact.LastWriteTime) { $stale = $true }
+    if ($stale) {
+        Mgr-Log 'warn' "源码比构建产物新（产物 $($artifact.LastWriteTime.ToString('HH:mm:ss')) < 源码 $($latestSrc.ToString('HH:mm:ss'))），用现有产物启动。"
+    }
+    return @{ File = 'node.exe'; Args = @((Join-Path $Checkout 'apps\cli\lib\bin.js'), 'web') }
+}
+
+# 一键启动：后台拉起 dsh web（stdout 重定向到运行日志），无独立控制台窗口
+function Start-Dsh {
+    if (Test-DshPort $Port) {
+        Mgr-Log 'info' "已在运行 $Url。"
+        return @{ ok = $true; already = $true; url = $script:Url }
+    }
+    $launch = Get-LaunchCommand
+    $quoted = @($launch.Args | ForEach-Object { '"' + $_ + '"' }) -join ' '
+    $cmdLine = '"' + $launch.File + '" ' + $quoted + ' --port ' + $Port + ' >> "' + $script:LaunchLog + '" 2>&1'
+    Mgr-Log 'info' "启动：$cmdLine（cwd: $Checkout）"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "$env:COMSPEC"
+    $psi.Arguments = '/d /s /c "' + $cmdLine + '"'
+    $psi.WorkingDirectory = $Checkout
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    try {
+        $started = $proc.Start()
+    } catch {
+        Mgr-Log 'error' "启动失败：$($_.Exception.Message)"
+        return @{ ok = $false; message = $_.Exception.Message }
+    }
+    Mgr-Log 'info' "已发起启动（PID $($proc.Id)），等待端口 $Port 就绪（最多 60 秒）..."
+    Mgr-Log 'info' '服务就绪后可在面板打开服务地址。'
+    return @{ ok = $true; already = $false; url = $script:Url }
+}
+
+# 一键停止：结束 dsh 服务及其全部相关进程
+function Stop-Dsh {
+    $ids = Get-DshProcessIds
+    if ($ids.Count -eq 0) {
+        Mgr-Log 'info' "未发现运行中的 dsh（端口 $Port 无监听且无相关进程）。"
+        return @{ ok = $true; message = '未发现运行中的 dsh。' }
+    }
+    Mgr-Log 'info' "停止 dsh：共找到 $($ids.Count) 个相关进程，逐一结束（含子进程）..."
+    $taskkill = Join-Path $env:WINDIR 'System32\taskkill.exe'
+    foreach ($procId in $ids) {
+        Mgr-Log 'info' "结束进程 PID $procId 及其进程树..."
+        try {
+            $out = & $taskkill /PID $procId /T /F 2>&1
+            foreach ($line in $out) { if ($line) { Mgr-Log 'info' $line } }
+        } catch {
+            Mgr-Log 'warn' "结束 PID $procId 失败：$($_.Exception.Message)"
+            try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+    Start-Sleep -Milliseconds 800
+    $left = @(Get-DshListener $Port)
+    foreach ($c in $left) {
+        if ($c.OwningProcess -gt 0) {
+            Mgr-Log 'info' "端口 $Port 仍被 PID $($c.OwningProcess) 占用，强制结束..."
+            & $taskkill /PID $c.OwningProcess /T /F 2>&1 | Out-Null
+        }
+    }
+    if (Test-DshPort $Port) {
+        Mgr-Log 'warn' "端口 $Port 仍在监听，可能有无权限结束的系统进程。"
+        return @{ ok = $false; message = "端口 $Port 仍在监听。" }
+    }
+    Mgr-Log 'ok' '已停止：dsh Web 服务及其全部相关进程已关闭。'
+    return @{ ok = $true; message = '已停止：dsh Web 服务及其全部相关进程已关闭。' }
+}
+
+function Restart-Dsh {
+    if (Test-DshPort $Port) {
+        Mgr-Log 'info' '正在停止 dsh ...'
+        $null = Stop-Dsh
+        Start-Sleep -Seconds 2
+    }
+    return Start-Dsh
+}
+
+# ── HTTP 服务（TcpListener 最小实现）───────────────────────────────────────
+
+function Get-Status {
+    Reap-PluginJob
+    $running = Test-DshPort $Port
+    return [pscustomobject]@{
+        running = $running
+        url = $script:Url
+        port = $Port
+        managerUrl = $script:ManagerUrl
+        pluginBusy = $script:PluginBusy
+    }
+}
+
+# 原生文件夹选择对话框（独立进程运行，绝不阻塞 HTTP 主循环）：
+# 弹 FolderBrowserDialog，结束后把结果（选中路径或空=取消）写入临时结果文件，
+# 前端轮询 /api/pick-directory-result 取回。
+function Start-FolderPicker {
+    $resultFile = Join-Path $env:TEMP 'dsh-picker-result.txt'
+    Remove-Item $resultFile -Force -ErrorAction SilentlyContinue
+    $inner = @'
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+$f = New-Object System.Windows.Forms.FolderBrowserDialog
+$f.Description = '选择插件文件夹'
+$f.ShowNewFolderButton = $false
+$r = $f.ShowDialog()
+if ($r -eq [System.Windows.Forms.DialogResult]::OK) {
+    [System.IO.File]::WriteAllText($env:TEMP + '\dsh-picker-result.txt', $f.SelectedPath, (New-Object System.Text.UTF8Encoding($false)))
+} else {
+    [System.IO.File]::WriteAllText($env:TEMP + '\dsh-picker-result.txt', '', (New-Object System.Text.UTF8Encoding($false)))
+}
+'@
+    $innerFile = Join-Path $env:TEMP 'dsh-picker-dialog.ps1'
+    [System.IO.File]::WriteAllText($innerFile, $inner, (New-Object System.Text.UTF8Encoding($true)))
+    try {
+        # 独立进程 + 隐藏控制台窗口：只显示文件夹选择对话框，不闪 PowerShell 黑窗
+        Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', $innerFile) -WindowStyle Hidden | Out-Null
+    } catch {
+        return @{ ok = $false; message = $_.Exception.Message }
+    }
+    return @{ ok = $true; message = '' }
+}
+
+# 读取文件夹选择结果（一次性；读完即删）
+function Read-FolderPickerResult {
+    $resultFile = Join-Path $env:TEMP 'dsh-picker-result.txt'
+    if (-not (Test-Path $resultFile)) { return @{ done = $false; path = $null } }
+    try {
+        $path = [System.IO.File]::ReadAllText($resultFile, [System.Text.Encoding]::UTF8).Trim()
+    } catch {
+        $path = ''
+    }
+    Remove-Item $resultFile -Force -ErrorAction SilentlyContinue
+    return @{ done = $true; path = if ($path -eq '') { $null } else { $path } }
+}
+
+function Read-LogLines([string]$path, [int]$cursor) {
+    if (-not (Test-Path $path)) { return @{ lines = @(); cursor = 0 } }
+    $lines = @()
+    try {
+        # 用 FileShare.ReadWrite 读取：dsh web 运行时会一直持有日志文件的写句柄，
+        # 默认 FileShare.Read 会抛 "being used by another process" 导致日志区空白。
+        $fs = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $reader = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+        try {
+            $content = $reader.ReadToEnd()
+        } finally {
+            $reader.Dispose()
+            $fs.Dispose()
+        }
+        if ($content.Length -gt 0) {
+            $lines = @($content -split "`r?`n" | Where-Object { $_ -ne '' })
+        }
+    } catch {
+        $lines = @()
+    }
+    $total = $lines.Count
+    $new = @()
+    if ($cursor -lt $total) {
+        $new = @($lines[$cursor..($total - 1)])
+    }
+    return @{ lines = $new; cursor = $total }
+}
+
+function New-JsonResp($obj, [int]$code = 200) {
+    return [pscustomobject]@{ code = $code; type = 'application/json; charset=utf-8'; data = ($obj | ConvertTo-Json -Depth 8 -Compress) }
+}
+
+function New-FileResp([string]$path, [string]$type) {
+    if (-not (Test-Path $path)) {
+        return [pscustomobject]@{ code = 404; type = 'text/plain; charset=utf-8'; data = 'not found' }
+    }
+    $data = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+    return [pscustomobject]@{ code = 200; type = $type; data = $data }
+}
+
+function Send-Response($stream, $resp) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$resp.data)
+    $reason = switch ([int]$resp.code) {
+        200 { 'OK' } 400 { 'Bad Request' } 404 { 'Not Found' } 409 { 'Conflict' } 500 { 'Internal Server Error' }
+        default { 'OK' }
+    }
+    $head = "HTTP/1.1 $($resp.code) $reason`r`nContent-Type: $($resp.type)`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`nCache-Control: no-store`r`n`r`n"
+    try {
+        $headBytes = [System.Text.Encoding]::UTF8.GetBytes($head)
+        $stream.Write($headBytes, 0, $headBytes.Length)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+    } catch {}
+}
+
+# 解析查询参数：?profile=web&cursor=3
+function Get-Query([string]$rawPath) {
+    $q = @{}
+    if ($rawPath -match '\?([^#]+)') {
+        foreach ($pair in ($matches[1] -split '&')) {
+            $kv = $pair -split '=', 2
+            if ($kv.Count -eq 2) { $q[[uri]::UnescapeDataString($kv[0])] = [uri]::UnescapeDataString($kv[1]) }
+        }
+    }
+    return $q
+}
+
+function Route-Request([string]$method, [string]$rawPath, [string]$body) {
+    $path = ($rawPath -split '\?')[0]
+    try {
+        switch ($path) {
+            '/' { return New-FileResp (Join-Path $script:Here 'index.html') 'text/html; charset=utf-8' }
+            '/index.html' { return New-FileResp (Join-Path $script:Here 'index.html') 'text/html; charset=utf-8' }
+            '/app.js' { return New-FileResp (Join-Path $script:Here 'app.js') 'application/javascript; charset=utf-8' }
+
+            '/api/status' {
+                if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
+                return New-JsonResp (Get-Status)
+            }
+            '/api/profiles' {
+                if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
+                return New-JsonResp @('web', 'headless')
+            }
+            '/api/pick-directory' {
+                if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
+                return New-JsonResp (Start-FolderPicker)
+            }
+            '/api/pick-directory-result' {
+                if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
+                return New-JsonResp (Read-FolderPickerResult)
+            }
+            '/api/plugins' {
+                if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
+                $q = Get-Query $rawPath
+                $profile = if ($q['profile']) { $q['profile'] } else { 'web' }
+                return New-JsonResp @{ profile = $profile; plugins = @(Get-InstalledPlugins $profile) }
+            }
+            '/api/logs' {
+                if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
+                $q = Get-Query $rawPath
+                $which = if ($q['log']) { $q['log'] } else { 'launch' }
+                $cursor = 0
+                if ($q['cursor'] -match '^\d+$') { $cursor = [int]$q['cursor'] }
+                $file = if ($which -eq 'plugin') { $script:PluginLog } else { $script:LaunchLog }
+                return New-JsonResp (Read-LogLines $file $cursor)
+            }
+
+            '/api/start' {
+                if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
+                return New-JsonResp (Start-Dsh)
+            }
+            '/api/stop' {
+                if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
+                return New-JsonResp (Stop-Dsh)
+            }
+            '/api/restart' {
+                if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
+                return New-JsonResp (Restart-Dsh)
+            }
+
+            '/api/plugins/install' {
+                if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
+                # dsh 运行中禁止安装：组合层变更需重启 dsh 才生效，先停服务再安装
+                if (Test-DshPort $Port) {
+                    return New-JsonResp @{
+                        ok = $false
+                        message = 'dsh 服务正在运行，不能安装插件。请先点击「停止服务」关闭 dsh，再安装插件，安装完成后重启 dsh 生效。'
+                    } 409
+                }
+                $req = $null
+                try { $req = $body | ConvertFrom-Json } catch {}
+                if (-not $req -or -not $req.profile -or -not $req.spec) { return New-JsonResp @{ error = 'profile/spec required' } 400 }
+                $spec = Get-InstallSpec ([string]$req.source) ([string]$req.spec)
+                if ($spec -eq '') { return New-JsonResp @{ error = 'spec empty' } 400 }
+                if (-not (Start-PluginJob $req.profile @('add', $spec) '安装成功。Web 端插件需重启 dsh 才生效。')) {
+                    return New-JsonResp @{ ok = $false; message = '已有插件操作在进行中。' } 409
+                }
+                return New-JsonResp @{ ok = $true; message = "开始安装：$spec" }
+            }
+            '/api/plugins/uninstall' {
+                if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
+                # dsh 运行中禁止卸载：组合层变更需重启 dsh 才生效，先停服务再卸载
+                if (Test-DshPort $Port) {
+                    return New-JsonResp @{
+                        ok = $false
+                        message = 'dsh 服务正在运行，不能卸载插件。请先点击「停止服务」关闭 dsh，再卸载插件，卸载完成后重启 dsh 生效。'
+                    } 409
+                }
+                $req = $null
+                try { $req = $body | ConvertFrom-Json } catch {}
+                if (-not $req -or -not $req.profile -or -not $req.name) { return New-JsonResp @{ error = 'profile/name required' } 400 }
+                if (-not (Start-PluginJob $req.profile @('remove', [string]$req.name) '卸载完成。Web 端需重启 dsh 生效。')) {
+                    return New-JsonResp @{ ok = $false; message = '已有插件操作在进行中。' } 409
+                }
+                return New-JsonResp @{ ok = $true; message = "开始卸载：$($req.name)" }
+            }
+            '/api/plugins/toggle' {
+                if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
+                $req = $null
+                try { $req = $body | ConvertFrom-Json } catch {}
+                if (-not $req -or -not $req.profile -or -not $req.name) { return New-JsonResp @{ error = 'profile/name/enable required' } 400 }
+                $enable = [bool]$req.enable
+                return New-JsonResp (Set-PluginEnabled $req.profile ([string]$req.name) $enable)
+            }
+
+            default { return New-JsonResp @{ error = "not found: $path" } 404 }
+        }
+    } catch {
+        Write-Crash 'Route' $_
+        return New-JsonResp @{ error = $_.Exception.Message } 500
+    }
+}
+
+function Handle-Client($client) {
+    $stream = $null
+    try {
+        # NoDelay 降低小请求延迟；读超时缩短到 2s：浏览器预连接的空闲 socket
+        # 不会长时间卡住单线程 accept 循环（否则后续启动/停止请求会排队超时）。
+        $client.NoDelay = $true
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = 2000
+        $buf = New-Object byte[] 8192
+        $headerText = ''
+        while ($true) {
+            $n = $stream.Read($buf, 0, $buf.Length)
+            if ($n -le 0) { return }
+            $headerText += [System.Text.Encoding]::UTF8.GetString($buf, 0, $n)
+            if ($headerText -match '\r?\n\r?\n') { break }
+            if ($headerText.Length -gt 65536) { return }
+        }
+        # 拆分头部与正文（一次 Read 可能同时带回 header+body）
+        $sepLen = 0
+        $headEnd = $headerText.IndexOf("`r`n`r`n")
+        if ($headEnd -lt 0) {
+            $headEnd = $headerText.IndexOf("`n`n")
+            $sepLen = 2
+        } else {
+            $sepLen = 4
+        }
+        if ($headEnd -lt 0) { return }
+        $headPart = $headerText.Substring(0, $headEnd)
+        $body = $headerText.Substring($headEnd + $sepLen)
+        $parts = $headPart -split "`r`n"
+        $requestLine = @($parts[0] -split ' ')
+        if ($requestLine.Count -lt 2) { return }
+        $method = $requestLine[0]
+        $rawPath = $requestLine[1]
+        $contentLength = 0
+        foreach ($h in $parts) {
+            if ($h -match '^Content-Length:\s*(\d+)') { $contentLength = [int]$matches[1]; break }
+        }
+        if ($contentLength -gt 0) {
+            while ($body.Length -lt $contentLength) {
+                $n = $stream.Read($buf, 0, $buf.Length)
+                if ($n -le 0) { break }
+                $body += [System.Text.Encoding]::UTF8.GetString($buf, 0, $n)
+            }
+        }
+        $resp = Route-Request $method $rawPath $body
+        Send-Response $stream $resp
+    } catch {
+        Write-Crash 'HandleClient' $_
+        try { Send-Response $stream ([pscustomobject]@{ code = 500; type = 'text/plain; charset=utf-8'; data = 'internal error' }) } catch {}
+    } finally {
+        try { $client.Close() } catch {}
+    }
+}
+
+# ── 主入口 ──────────────────────────────────────────────────────────────────
+
+# 端口自动回退：默认端口被残留进程占用时依次尝试后续端口，保证面板一定能起来
+$listener = $null
+$boundPort = $null
+foreach ($tryPort in ($ManagerPort..($ManagerPort + 10))) {
+    $try = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $tryPort)
+    try {
+        $try.Start()
+        $listener = $try
+        $boundPort = $tryPort
+        break
+    } catch {
+        try { $try.Stop() } catch {}
+    }
+}
+if (-not $listener) {
+    Write-Host "[dsh] 错误：端口 $ManagerPort 到 $($ManagerPort + 10) 均被占用，无法启动管理面板。"
+    Write-Host "[dsh] 请关闭仍在运行的旧面板进程后重试。"
+    Read-Host '按回车退出'
+    exit 1
+}
+$script:ManagerUrl = "http://127.0.0.1:$boundPort"
+if ($boundPort -ne $ManagerPort) {
+    Write-Host "[dsh] 注意：默认端口 $ManagerPort 被占用，已改用端口 $boundPort。"
+}
+
+Write-Host "DEEPSEEK HARNESS 管理面板"
+Write-Host "  面板地址：$script:ManagerUrl"
+Write-Host "  服务地址：$script:Url"
+Write-Host "  checkout：$Checkout"
+Write-Host "  按 Ctrl+C 或关闭此窗口即可退出面板。"
+Mgr-Log 'info' "管理面板已启动（checkout: $Checkout，端口 $boundPort）。"
+Mgr-Log 'info' "服务地址：$Url"
+
+if (-not $NoBrowser) {
+    try { Start-Process $script:ManagerUrl } catch { Write-Host "[dsh] 自动打开浏览器失败，请手动访问 $script:ManagerUrl" }
+}
+
+while ($true) {
+    try {
+        $client = $listener.AcceptTcpClient()
+        Handle-Client $client
+    } catch {
+        Write-Crash 'AcceptLoop' $_
+        Start-Sleep -Milliseconds 200
+    }
+}

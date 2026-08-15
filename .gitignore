@@ -1,0 +1,7 @@
+﻿# 运行/崩溃日志
+*.log
+server-crash.log
+
+# 临时文件
+*.tmp
+Thumbs.db
