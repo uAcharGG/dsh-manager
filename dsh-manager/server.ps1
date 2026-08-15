@@ -35,7 +35,9 @@ $script:ManagerUrl = "http://127.0.0.1:$ManagerPort"
 $global:DSHManagerCrashLog = Join-Path $script:Here 'server-crash.log'
 $script:LaunchLog = Join-Path $env:TEMP 'dsh-manager-launch.log'
 $script:PluginLog = Join-Path $env:TEMP 'dsh-manager-plugin.log'
-Remove-Item $script:LaunchLog, $script:PluginLog -Force -ErrorAction SilentlyContinue
+# 请求追踪日志（诊断用）：记录每个连接/请求/超时，排查前端 fetch 失败
+$script:ReqLog = Join-Path $env:TEMP 'dsh-manager-req.log'
+Remove-Item $script:LaunchLog, $script:PluginLog, $script:ReqLog -Force -ErrorAction SilentlyContinue
 $script:PluginBusy = $false
 $script:PluginJob = $null
 # dshm 自身配置（持久化到 %APPDATA%\dshm\config.json：dsh 启动路径等）
@@ -63,6 +65,10 @@ function Plugin-Log([string]$level, [string]$text) {
     $line = "[{0}] {1} {2}" -f (Get-Date -Format 'HH:mm:ss'), $level, $text
     try { Add-Content -Path $script:PluginLog -Value $line -Encoding UTF8 } catch {}
     Write-Host $line
+}
+# 请求追踪日志（诊断用，轻量追加）
+function Req-Log([string]$text) {
+    try { Add-Content -Path $script:ReqLog -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $text) -Encoding UTF8 } catch {}
 }
 
 # ── 端口 / 进程 ─────────────────────────────────────────────────────────────
@@ -804,6 +810,8 @@ function Handle-Client($client) {
         $client.NoDelay = $true
         $stream = $client.GetStream()
         $stream.ReadTimeout = 5000
+        try { $remote = [string]$client.Client.RemoteEndPoint } catch { $remote = '?' }
+        Req-Log ("ACCEPT " + $remote)
         $buf = New-Object byte[] 8192
         $headerText = ''
         while ($true) {
@@ -834,6 +842,7 @@ function Handle-Client($client) {
         foreach ($h in $parts) {
             if ($h -match '^Content-Length:\s*(\d+)') { $contentLength = [int]$matches[1]; break }
         }
+        Req-Log ("REQ " + $method + " " + $rawPath + " len=" + $contentLength)
         if ($contentLength -gt 0) {
             while ($body.Length -lt $contentLength) {
                 $n = $stream.Read($buf, 0, $buf.Length)
@@ -854,6 +863,7 @@ function Handle-Client($client) {
         }
         # 兜底：按消息特征识别超时/连接中断（不同 .NET 版本的异常链结构可能不同）
         if (-not $isTimeout -and ($_.Exception.Message -match '超时|timed out|没有正确答复|10060|10053|10054')) { $isTimeout = $true }
+        Req-Log ("ERR " + $(if ($isTimeout) { 'timeout' } else { 'other' }) + " :: " + $_.Exception.Message)
         if (-not $isTimeout) { Write-Crash 'HandleClient' $_ }
         try { $client.Close() } catch {}
     } finally {
@@ -928,6 +938,8 @@ while ($true) {
         Start-Sleep -Milliseconds 200
     }
 }
+
+
 
 
 
