@@ -835,17 +835,35 @@ function Handle-Client($client) {
         $isTimeout = $false
         $ex = $_.Exception
         while ($ex -ne $null) {
-            if ($ex -is [System.Net.Sockets.SocketException] -and $ex.ErrorCode -eq 10060) { $isTimeout = $true; break }
+            if ($ex -is [System.Net.Sockets.SocketException] -and ($ex.ErrorCode -eq 10060 -or $ex.ErrorCode -eq 10053 -or $ex.ErrorCode -eq 10054)) { $isTimeout = $true; break }
             $ex = $ex.InnerException
         }
+        # 兜底：按消息特征识别超时/连接中断（不同 .NET 版本的异常链结构可能不同）
+        if (-not $isTimeout -and ($_.Exception.Message -match '超时|timed out|没有正确答复|10060|10053|10054')) { $isTimeout = $true }
         if (-not $isTimeout) { Write-Crash 'HandleClient' $_ }
         try { $client.Close() } catch {}
     } finally {
+        # 先发 FIN 优雅关闭（避免残留未读数据时直接 Close 触发 RST，浏览器会误判为网络错误）
+        try { $client.Shutdown([System.Net.Sockets.SocketShutdown]::Both) } catch {}
         try { $client.Close() } catch {}
     }
 }
 
 # ── 主入口 ──────────────────────────────────────────────────────────────────
+
+# 单实例守卫：默认端口已被本面板（server.ps1）占用时不再启动第二个实例，
+# 直接打开已有面板并退出 —— 避免多次双击叠加多个面板实例 / 多个浏览器标签。
+$existing = Get-NetTCPConnection -LocalPort $ManagerPort -State Listen -ErrorAction SilentlyContinue
+if ($existing) {
+    $owner = $null
+    try { $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$($existing.OwningProcess)" -ErrorAction SilentlyContinue } catch {}
+    $isPanel = $owner -and $owner.CommandLine -match 'server[.]ps1'
+    if ($isPanel) {
+        Write-Host "[dsh] 管理面板已在运行（端口 $ManagerPort），直接打开浏览器。"
+        try { Start-Process $script:ManagerUrl } catch {}
+        exit 0
+    }
+}
 
 # 端口自动回退：默认端口被残留进程占用时依次尝试后续端口，保证面板一定能起来
 $listener = $null
@@ -896,6 +914,7 @@ while ($true) {
         Start-Sleep -Milliseconds 200
     }
 }
+
 
 
 

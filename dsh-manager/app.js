@@ -420,10 +420,10 @@ async function installPlugin() {
 
 // 通用目录选择：后端弹原生文件夹对话框（独立进程），轮询取回所选路径
 async function pickDirectory(desc, onPicked) {
-  // 打开对话框（失败自动重试一次，规避偶发的连接超时）
+  // 打开对话框（失败自动重试两次，规避偶发的连接复用/超时抖动）
   let opened = false;
   let r = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       r = await api('/api/pick-directory', {
         method: 'POST',
@@ -432,8 +432,8 @@ async function pickDirectory(desc, onPicked) {
       }, 10000);
       break;
     } catch (e) {
-      if (attempt === 0) {
-        await new Promise(res => setTimeout(res, 700));
+      if (attempt < 2) {
+        await new Promise(res => setTimeout(res, 800));
         continue;
       }
       alert('无法打开文件夹选择器：' + e.message);
