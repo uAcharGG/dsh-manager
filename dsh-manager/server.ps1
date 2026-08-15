@@ -558,12 +558,19 @@ $script:MarketGhCache = Join-Path $env:TEMP 'dshm-market-gh.json'
 $script:MarketCacheMinutes = 10
 
 # GitHub topic:dsh-plugin 插件列表（按 star 降序，10 分钟缓存）
+# 读取市场缓存并归一化为数组（规避 PS 5.1 ConvertFrom-Json 对顶层数组的
+# 包装怪癖：@(管道|ConvertFrom-Json) 会把 50 个元素包成 1 个）
+function Read-MarketCache {
+    $parsed = Get-Content -LiteralPath $script:MarketGhCache -Raw -Encoding UTF8 | ConvertFrom-Json
+    return @($parsed)
+}
+
 function Get-GitHubMarket {
     if (Test-Path $script:MarketGhCache) {
         $age = (Get-Date) - (Get-Item $script:MarketGhCache).LastWriteTime
         if ($age.TotalMinutes -lt $script:MarketCacheMinutes) {
             try {
-                return @{ ok = $true; cached = $true; source = 'github'; plugins = @(Get-Content -LiteralPath $script:MarketGhCache -Raw -Encoding UTF8 | ConvertFrom-Json) }
+                return @{ ok = $true; cached = $true; source = 'github'; plugins = Read-MarketCache }
             } catch {}
         }
     }
@@ -584,7 +591,7 @@ function Get-GitHubMarket {
         # 拉取失败：回退到旧缓存
         if (Test-Path $script:MarketGhCache) {
             try {
-                return @{ ok = $true; cached = $true; stale = $true; source = 'github'; plugins = @(Get-Content -LiteralPath $script:MarketGhCache -Raw -Encoding UTF8 | ConvertFrom-Json) }
+                return @{ ok = $true; cached = $true; stale = $true; source = 'github'; plugins = Read-MarketCache }
             } catch {}
         }
         return @{ ok = $false; message = "GitHub 插件列表拉取失败：$($_.Exception.Message)" }
@@ -1147,6 +1154,7 @@ while ($true) {
 Mgr-Log 'info' '面板已按请求退出，端口已释放。'
 try { $listener.Stop() } catch {}
 exit 0
+
 
 
 
