@@ -418,11 +418,15 @@ async function installPlugin() {
   }
 }
 
-// 点击文件夹图标：弹出原生文件夹选择对话框（后端独立进程），轮询取回所选路径
-async function pickLocalFolder() {
+// 通用目录选择：后端弹原生文件夹对话框（独立进程），轮询取回所选路径
+async function pickDirectory(desc, onPicked) {
   let opened = false;
   try {
-    const r = await api('/api/pick-directory', { method: 'POST' }, 10000);
+    const r = await api('/api/pick-directory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ desc: desc }),
+    }, 10000);
     if (!r || !r.ok) {
       alert('无法打开文件夹选择器：' + (r && r.message || '未知错误'));
       return;
@@ -434,21 +438,68 @@ async function pickLocalFolder() {
       await new Promise(resolve => setTimeout(resolve, 600));
       const res = await api('/api/pick-directory-result', {}, 5000).catch(() => null);
       if (res && res.done) {
-        if (res.path) {
-          const src = document.getElementById('install-source');
-          src.value = 'local';
-          src.dispatchEvent(new Event('change'));
-          document.getElementById('install-input').value = res.path;
-          appendLogLine(document.getElementById('plugin-log'),
-            '[' + now() + '] info    已选择本地插件文件夹：' + res.path + '（将按 link: 形式安装）');
-        }
+        if (res.path) onPicked(res.path);
         return; // 取消也到此结束
       }
     }
-    appendLogLine(document.getElementById('plugin-log'),
-      '[' + now() + '] warn    选择文件夹超时，请重试');
+    alert('选择文件夹超时，请重试');
   } catch (e) {
     alert(opened ? '选择文件夹失败：' + e.message : '无法打开文件夹选择器：' + e.message);
+  }
+}
+
+// 插件安装：点击文件夹图标选择本地插件文件夹
+async function pickLocalFolder() {
+  await pickDirectory('选择插件文件夹', (p) => {
+    const src = document.getElementById('install-source');
+    src.value = 'local';
+    src.dispatchEvent(new Event('change'));
+    document.getElementById('install-input').value = p;
+    appendLogLine(document.getElementById('plugin-log'),
+      '[' + now() + '] info    已选择本地插件文件夹：' + p + '（将按 link: 形式安装）');
+  });
+}
+
+// ── dsh 启动路径 ───────────────────────────────────────────────────────────
+
+// 读取后端当前生效的 dsh 启动路径
+async function loadDshConfig() {
+  try {
+    const cfg = await api('/api/config');
+    document.getElementById('dsh-checkout').value = cfg.checkout || '';
+  } catch (e) { /* 后端未就绪时输入框保持为空 */ }
+}
+
+// 服务控制区：点击文件夹图标选择 dsh 源码目录，选择后立即保存
+async function pickDshDir() {
+  await pickDirectory('选择 dsh 启动目录（deepseek-harness 源码目录）', (p) => {
+    document.getElementById('dsh-checkout').value = p;
+    saveDshConfig();
+  });
+}
+
+// 保存 dsh 启动路径
+async function saveDshConfig() {
+  const val = document.getElementById('dsh-checkout').value.trim();
+  if (!val) {
+    alert('请输入 dsh 启动路径');
+    return;
+  }
+  const btn = document.getElementById('btn-save-dsh');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ checkout: val }),
+    }, 15000);
+    appendLogLine(document.getElementById('launch-log'),
+      '[' + now() + '] ' + (r.ok ? 'ok      启动路径已保存：' : 'warn    保存失败：') + (r.checkout || r.message || ''));
+    if (!r.ok) alert('保存失败：' + (r.message || '未知错误'));
+  } catch (e) {
+    alert('保存失败：' + e.message);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -471,6 +522,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function init() {
   await loadProfiles();
+  await loadDshConfig();
   await refreshStatus();
   await pollLogs();
   await refreshPlugins();

@@ -424,6 +424,22 @@
     color: var(--text-tertiary);
     margin-right: 6px;
   }
+  .ds-launch-path {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .ds-launch-path .ds-input {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+  .ds-launch-hint {
+    font-size: 11px;
+    color: var(--text-quaternary);
+    margin-top: 6px;
+  }
 
   .ds-hidden { display: none; }
   .ds-busy-hint { color: var(--warning); font-size: 12px; }
@@ -472,6 +488,20 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
               重启服务
             </button>
+          </div>
+          <div class="ds-addr-card">
+            <div style="flex:1;min-width:0;">
+              <div class="ds-addr-label">dsh 启动路径（deepseek-harness 源码目录）</div>
+              <div class="ds-launch-path">
+                <input class="ds-input" id="dsh-checkout" type="text" spellcheck="false"
+                  placeholder="选择或输入 dsh 源码目录，如 D:\AI\DeepSeekHarness\deepseek-harness" />
+                <button class="ds-btn ghost" id="btn-pick-dsh" onclick="pickDshDir()" title="选择 dsh 启动目录">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+                </button>
+                <button class="ds-btn small" id="btn-save-dsh" onclick="saveDshConfig()">保存</button>
+              </div>
+              <div class="ds-launch-hint">修改后下次点击「启动服务」生效（当前运行的 dsh 不受影响）。</div>
+            </div>
           </div>
           <div class="ds-addr-card">
             <div>

@@ -38,6 +38,9 @@ $script:PluginLog = Join-Path $env:TEMP 'dsh-manager-plugin.log'
 Remove-Item $script:LaunchLog, $script:PluginLog -Force -ErrorAction SilentlyContinue
 $script:PluginBusy = $false
 $script:PluginJob = $null
+# dshm 自身配置（持久化到 %APPDATA%\dshm\config.json：dsh 启动路径等）
+$script:DshmConfigFile = Join-Path $env:APPDATA 'dshm\config.json'
+$script:DshmConfig = @{}
 
 function Write-Crash([string]$context, $errorRecord) {
     try {
@@ -305,7 +308,7 @@ function Get-InstallSpec([string]$source, [string]$value) {
 
 # 异步插件命令（后台 job，输出实时写入插件日志）
 # 与老实现同款命令：pnpm dsh plugin --profile <profile> add/remove <spec>（cwd=checkout）
-function Start-PluginJob([string]$profile, [string[]]$pnpmArgs, [string]$doneLabel) {
+function Start-PluginJob([string]$profile, [string[]]$pnpmArgs, [string]$doneLabel, [string]$onSuccess = '') {
     if ($script:PluginBusy) { return $false }
     # 服务端解析 pnpm 全路径并传给 job，避免 job 内 PATH 解析不一致
     $pnpmPath = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
@@ -320,8 +323,8 @@ function Start-PluginJob([string]$profile, [string[]]$pnpmArgs, [string]$doneLab
     # 参数用单元分隔符序列化，规避 Start-Job -ArgumentList 对数组的展开差异
     $argsJoined = @($pnpmArgs | ForEach-Object { $_ }) -join [string][char]0x241F
     try {
-        $script:PluginJob = Start-Job -ArgumentList $profile, $argsJoined, $logFile, $checkout, $pnpmPath, $dshHome, $doneLabel -ScriptBlock {
-            param($profile, $argsJoined, $logFile, $checkout, $pnpmPath, $dshHome, $doneLabel)
+        $script:PluginJob = Start-Job -ArgumentList $profile, $argsJoined, $logFile, $checkout, $pnpmPath, $dshHome, $doneLabel, $onSuccess -ScriptBlock {
+            param($profile, $argsJoined, $logFile, $checkout, $pnpmPath, $dshHome, $doneLabel, $onSuccess)
             if ($dshHome) { $env:DSH_HOME = $dshHome }
             function PLog($t) { try { Add-Content -Path $logFile -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $t) -Encoding UTF8 } catch {} }
             $pnpmArgs = @($argsJoined -split [string][char]0x241F)
@@ -346,6 +349,10 @@ function Start-PluginJob([string]$profile, [string[]]$pnpmArgs, [string]$doneLab
             try { $proc.Dispose() } catch {}
             PLog "info 命令完成，退出码 $code"
             if ($code -eq 0) { PLog "ok $doneLabel" }
+            # 命令成功后执行调用方传入的清理（如卸载时删除插件本地配置文件）
+            if ($code -eq 0 -and $onSuccess) {
+                try { Invoke-Expression $onSuccess } catch { PLog "error 卸载后清理失败：$($_.Exception.Message)" }
+            }
         }
     } catch {
         # Start-Job 自身失败：立即复位 busy，避免前端永久显示"安装中"
@@ -388,19 +395,19 @@ function Get-LatestSourceTime([string]$root) {
 }
 
 function Get-LaunchCommand {
-    $libBin = Join-Path $Checkout 'apps\cli\lib\bin.js'
+    $libBin = Join-Path $script:Checkout 'apps\cli\lib\bin.js'
     $artifact = if (Test-Path $libBin) { Get-Item $libBin } else { $null }
     if (-not $artifact) {
         Mgr-Log 'warn' '构建产物缺失（apps/cli/lib/bin.js），回退 tsx 慢路径（建议先 pnpm run build）。'
         return @{ File = 'pnpm.cmd'; Args = @('dsh', 'web') }
     }
     $stale = $false
-    $latestSrc = Get-LatestSourceTime $Checkout
+    $latestSrc = Get-LatestSourceTime $script:Checkout
     if ($latestSrc -gt $artifact.LastWriteTime) { $stale = $true }
     if ($stale) {
         Mgr-Log 'warn' "源码比构建产物新（产物 $($artifact.LastWriteTime.ToString('HH:mm:ss')) < 源码 $($latestSrc.ToString('HH:mm:ss'))），用现有产物启动。"
     }
-    return @{ File = 'node.exe'; Args = @((Join-Path $Checkout 'apps\cli\lib\bin.js'), 'web') }
+    return @{ File = 'node.exe'; Args = @((Join-Path $script:Checkout 'apps\cli\lib\bin.js'), 'web') }
 }
 
 # 一键启动：后台拉起 dsh web（stdout 重定向到运行日志），无独立控制台窗口
@@ -412,11 +419,11 @@ function Start-Dsh {
     $launch = Get-LaunchCommand
     $quoted = @($launch.Args | ForEach-Object { '"' + $_ + '"' }) -join ' '
     $cmdLine = '"' + $launch.File + '" ' + $quoted + ' --port ' + $Port + ' >> "' + $script:LaunchLog + '" 2>&1'
-    Mgr-Log 'info' "启动：$cmdLine（cwd: $Checkout）"
+    Mgr-Log 'info' "启动：$cmdLine（cwd: $script:Checkout）"
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "$env:COMSPEC"
     $psi.Arguments = '/d /s /c "' + $cmdLine + '"'
-    $psi.WorkingDirectory = $Checkout
+    $psi.WorkingDirectory = $script:Checkout
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $proc = New-Object System.Diagnostics.Process
@@ -476,6 +483,59 @@ function Restart-Dsh {
     return Start-Dsh
 }
 
+# ── dshm 配置（启动路径等，持久化到 %APPDATA%\dshm\config.json）──────────────
+
+# 加载持久化配置并应用：配置中的启动路径存在时覆盖默认 checkout
+function Load-DshmConfig {
+    $script:DshmConfig = @{}
+    if (-not (Test-Path -LiteralPath $script:DshmConfigFile)) { return }
+    try {
+        $cfg = Get-Content -LiteralPath $script:DshmConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($cfg) {
+            $cfg.PSObject.Properties | ForEach-Object { $script:DshmConfig[$_.Name] = [string]$_.Value }
+        }
+    } catch {
+        Mgr-Log 'warn' "读取 dshm 配置失败：$($_.Exception.Message)"
+        return
+    }
+    $cfgCheckout = $script:DshmConfig['checkout']
+    if ($cfgCheckout) {
+        if (Test-Path -LiteralPath $cfgCheckout -PathType Container) {
+            $script:Checkout = $cfgCheckout
+            Mgr-Log 'info' "使用配置中的 dsh 启动路径：$cfgCheckout"
+        } else {
+            Mgr-Log 'warn' "配置中的启动路径不存在（$cfgCheckout），本次回退默认：$Checkout"
+        }
+    }
+}
+
+# 当前配置视图（GET /api/config）
+function Get-DshmConfig {
+    return @{ checkout = $script:Checkout; configFile = $script:DshmConfigFile }
+}
+
+# 保存 dsh 启动路径（POST /api/config）
+function Save-DshmCheckout([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return @{ ok = $false; message = '启动路径不能为空。' }
+    }
+    $path = $path.Trim()
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        return @{ ok = $false; message = "路径不存在或不是文件夹：$path" }
+    }
+    $script:Checkout = $path
+    $script:DshmConfig['checkout'] = $path
+    try {
+        $cfgDir = Split-Path -Parent $script:DshmConfigFile
+        if (-not (Test-Path -LiteralPath $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+        [System.IO.File]::WriteAllText($script:DshmConfigFile, ($script:DshmConfig | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+        Mgr-Log 'ok' "启动路径已更新：$path（下次启动 dsh 时生效）"
+        return @{ ok = $true; checkout = $path; message = "启动路径已保存：$path`n下次点击「启动服务」将按新路径启动，当前运行的 dsh 不受影响。" }
+    } catch {
+        return @{ ok = $false; message = "保存 dshm 配置失败：$($_.Exception.Message)" }
+    }
+}
+
 # ── HTTP 服务（TcpListener 最小实现）───────────────────────────────────────
 
 function Get-Status {
@@ -493,13 +553,13 @@ function Get-Status {
 # 原生文件夹选择对话框（独立进程运行，绝不阻塞 HTTP 主循环）：
 # 弹 FolderBrowserDialog，结束后把结果（选中路径或空=取消）写入临时结果文件，
 # 前端轮询 /api/pick-directory-result 取回。
-function Start-FolderPicker {
+function Start-FolderPicker([string]$desc = '选择插件文件夹') {
     $resultFile = Join-Path $env:TEMP 'dsh-picker-result.txt'
     Remove-Item $resultFile -Force -ErrorAction SilentlyContinue
     $inner = @'
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
 $f = New-Object System.Windows.Forms.FolderBrowserDialog
-$f.Description = '选择插件文件夹'
+$f.Description = '__DESC__'
 $f.ShowNewFolderButton = $false
 $r = $f.ShowDialog()
 if ($r -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -509,7 +569,7 @@ if ($r -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 '@
     $innerFile = Join-Path $env:TEMP 'dsh-picker-dialog.ps1'
-    [System.IO.File]::WriteAllText($innerFile, $inner, (New-Object System.Text.UTF8Encoding($true)))
+    [System.IO.File]::WriteAllText($innerFile, $inner.Replace('__DESC__', $desc.Replace("'", "''")), (New-Object System.Text.UTF8Encoding($true)))
     try {
         # 独立进程 + 隐藏控制台窗口：只显示文件夹选择对话框，不闪 PowerShell 黑窗
         Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', $innerFile) -WindowStyle Hidden | Out-Null
@@ -615,9 +675,19 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
                 if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
                 return New-JsonResp @('web', 'headless')
             }
+            '/api/config' {
+                if ($method -eq 'GET') { return New-JsonResp (Get-DshmConfig) }
+                if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
+                $req = $null
+                try { $req = $body | ConvertFrom-Json } catch {}
+                if (-not $req -or $null -eq $req.checkout) { return New-JsonResp @{ error = 'checkout required' } 400 }
+                return New-JsonResp (Save-DshmCheckout ([string]$req.checkout))
+            }
             '/api/pick-directory' {
                 if ($method -ne 'POST') { return New-JsonResp @{ error = 'POST only' } 400 }
-                return New-JsonResp (Start-FolderPicker)
+                $desc = '选择插件文件夹'
+                try { $rq = $body | ConvertFrom-Json; if ($rq -and $rq.desc) { $desc = [string]$rq.desc } } catch {}
+                return New-JsonResp (Start-FolderPicker $desc)
             }
             '/api/pick-directory-result' {
                 if ($method -ne 'GET') { return New-JsonResp @{ error = 'GET only' } 400 }
@@ -683,7 +753,14 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
                 $req = $null
                 try { $req = $body | ConvertFrom-Json } catch {}
                 if (-not $req -or -not $req.profile -or -not $req.name) { return New-JsonResp @{ error = 'profile/name required' } 400 }
-                if (-not (Start-PluginJob $req.profile @('remove', [string]$req.name) '卸载完成。Web 端需重启 dsh 生效。')) {
+                # 卸载视觉插件：命令成功后删除其本地配置文件（$DSH_HOME\vision-config.json）
+                $cleanup = ''
+                if ([string]$req.name -eq '@uachar/dsh-vision-plugin') {
+                    $vHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+                    $vCfg = Join-Path $vHome 'vision-config.json'
+                    $cleanup = "Remove-Item -LiteralPath '$vCfg' -Force -ErrorAction SilentlyContinue; PLog 'info 已删除视觉插件本地配置文件：$vCfg'"
+                }
+                if (-not (Start-PluginJob $req.profile @('remove', [string]$req.name) '卸载完成。Web 端需重启 dsh 生效。' $cleanup)) {
                     return New-JsonResp @{ ok = $false; message = '已有插件操作在进行中。' } 409
                 }
                 return New-JsonResp @{ ok = $true; message = "开始卸载：$($req.name)" }
@@ -787,12 +864,15 @@ if ($boundPort -ne $ManagerPort) {
     Write-Host "[dsh] 注意：默认端口 $ManagerPort 被占用，已改用端口 $boundPort。"
 }
 
+# 加载持久化的 dshm 配置（dsh 启动路径等），覆盖默认 checkout
+Load-DshmConfig
+
 Write-Host "DEEPSEEK HARNESS 管理面板"
 Write-Host "  面板地址：$script:ManagerUrl"
 Write-Host "  服务地址：$script:Url"
-Write-Host "  checkout：$Checkout"
+Write-Host "  checkout：$script:Checkout"
 Write-Host "  按 Ctrl+C 或关闭此窗口即可退出面板。"
-Mgr-Log 'info' "管理面板已启动（checkout: $Checkout，端口 $boundPort）。"
+Mgr-Log 'info' "管理面板已启动（checkout: $script:Checkout，端口 $boundPort）。"
 Mgr-Log 'info' "服务地址：$Url"
 
 if (-not $NoBrowser) {
@@ -808,3 +888,5 @@ while ($true) {
         Start-Sleep -Milliseconds 200
     }
 }
+
+

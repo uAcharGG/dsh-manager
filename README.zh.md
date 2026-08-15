@@ -1,4 +1,4 @@
-﻿# dsh-manager — DeepSeek Harness 管理面板
+# dsh-manager — DeepSeek Harness 管理面板
 
 DeepSeek Harness（`dsh web`）的一键本地启动器与管理面板。双击即可启动 harness，随后在浏览器里管理：启动/停止/重启服务、安装/卸载/启停插件、查看实时日志、用原生对话框选择插件文件夹。
 
@@ -7,6 +7,7 @@ DeepSeek Harness（`dsh web`）的一键本地启动器与管理面板。双击�
 ## 功能特性
 
 - **一键服务控制** — 启动/停止/重启本地 `dsh web`（默认端口 3080），带就绪检测与自动打开浏览器。
+- **可配置 dsh 启动路径** — 服务控制区新增「dsh 启动路径」行：可输入或点文件夹图标选择 deepseek-harness 源码目录并保存。持久化到 `%APPDATA%\dshm\config.json`，优先于 `-Checkout` 默认值，下次启动 dsh 生效（当前运行的 dsh 不受影响）。
 - **插件管理** — 通过后台 `dsh plugin`（pnpm）对 profile 组合层执行安装/卸载/启停，日志区实时显示进度。
 - **运行中保护** — dsh 运行中禁止安装/卸载插件：组合层变更需重启才生效，面板会提示先停止服务。
 - **原生文件夹选择** — 文件夹图标在独立进程中打开 Windows 文件夹对话框（无黑窗、不阻塞服务器），所选路径自动填入"本地路径"输入框。
@@ -19,13 +20,14 @@ DeepSeek Harness（`dsh web`）的一键本地启动器与管理面板。双击�
 2. 面板地址 `http://127.0.0.1:3399`，dsh 服务地址 `http://127.0.0.1:3080`。
 3. 「一键启动」页启动服务，「插件管理」页管理插件。
 
-> 端口：管理面板默认 **3399**（占用时自动回退），dsh 默认 **3080**。dsh 源码目录默认 `D:\AI\DeepSeekHarness\deepseek-harness`，可用 `-Checkout` 参数指定。
+> 端口：管理面板默认 **3399**（占用时自动回退），dsh 默认 **3080**。dsh 源码目录默认 `D:\AI\DeepSeekHarness\deepseek-harness`；可在面板「服务控制 → dsh 启动路径」中修改（保存到 `%APPDATA%\dshm\config.json`），也可用 `-Checkout` 参数指定。
 
 ## 插件操作流程
 
 - **安装本地插件**：先停止服务 → 点文件夹图标选择插件目录 → 点「安装」→ 重新启动服务。
 - **npm / git / tarball 安装**：选择来源类型、输入 spec、点「安装」（同样需先停止服务）。
 - **卸载 / 启停**：先停止服务，再卸载或切换开关；重启后生效。
+- **卸载清理** — 卸载成功后同时删除插件留下的本地配置文件（如 dsh-vision 会删除 `$DSH_HOME\vision-config.json`）。
 - 操作在后台 job 中执行，进度见插件日志，完成后列表自动刷新。
 
 ## HTTP API
@@ -37,6 +39,7 @@ DeepSeek Harness（`dsh web`）的一键本地启动器与管理面板。双击�
 | `/api/plugins?profile=` | GET | 已装插件（版本、README 描述、来源路径） |
 | `/api/logs?log=launch\|plugin&cursor=` | GET | 增量日志 |
 | `/api/start` / `/api/stop` / `/api/restart` | POST | 服务控制 |
+| `/api/config` | GET / POST | 读取 / 保存 dsh 启动路径（持久化到 `%APPDATA%\dshm\config.json`） |
 | `/api/plugins/install` / `uninstall` / `toggle` | POST | 插件操作（dsh 运行中禁止安装/卸载） |
 | `/api/pick-directory` / `pick-directory-result` | POST / GET | 原生文件夹选择（分离进程弹框 + 结果轮询） |
 
