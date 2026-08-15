@@ -565,10 +565,15 @@ function Start-FolderPicker([string]$desc = '选择插件文件夹') {
     $inner = @'
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
 Add-Type -AssemblyName System.Drawing | Out-Null
+# Win32 工具：枚举顶层窗口 + 强制置顶
+$nativeSrc = 'using System; using System.Runtime.InteropServices; using System.Text; public static class DlgNative { public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam); [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid); [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int max); [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags); public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1); }'
+$nativeOk = $false
+try { Add-Type -TypeDefinition $nativeSrc -ErrorAction Stop; $nativeOk = $true } catch {}
+
 $f = New-Object System.Windows.Forms.FolderBrowserDialog
 $f.Description = '__DESC__'
 $f.ShowNewFolderButton = $false
-# 隐藏的置顶宿主窗口：对话框以它为 owner，从而保持在所有普通窗口之上（置顶）
+# 隐藏的置顶宿主窗口：对话框以它为 owner，初始即在普通窗口之上
 $owner = New-Object System.Windows.Forms.Form
 $owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
 $owner.ShowInTaskbar = $false
@@ -577,7 +582,36 @@ $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
 $owner.Location = New-Object System.Drawing.Point(-32000, -32000)
 $owner.Size = New-Object System.Drawing.Size(1, 1)
 $owner.Show()
+if ($nativeOk) {
+    # 定时强制置顶：对话框显示期间反复把本进程的 #32770 窗口设为 TOPMOST，
+    # 即使有别的置顶窗口也盖不住它
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 250
+    $timer.Add_Tick({
+        $procId = [System.Diagnostics.Process]::GetCurrentProcess().Id
+        $cb = [DlgNative+EnumWindowsProc]{
+            param($hwnd, $lp)
+            $ownerPid = 0
+            [void][DlgNative]::GetWindowThreadProcessId($hwnd, [ref]$ownerPid)
+            if ($ownerPid -eq $procId) {
+                $cls = New-Object System.Text.StringBuilder 256
+                [void][DlgNative]::GetClassName($hwnd, $cls, 256)
+                if ($cls.ToString() -eq '#32770') {
+                    $script:dlgHwnd = $hwnd
+                    return $false
+                }
+            }
+            return $true
+        }
+        [void][DlgNative]::EnumWindows($cb, [IntPtr]::Zero)
+        if ($script:dlgHwnd -ne $null -and $script:dlgHwnd -ne [IntPtr]::Zero) {
+            [void][DlgNative]::SetWindowPos($script:dlgHwnd, [DlgNative]::HWND_TOPMOST, 0, 0, 0, 0, 0x13)
+        }
+    })
+    $timer.Start()
+}
 $r = $f.ShowDialog($owner)
+if ($nativeOk) { $timer.Stop() }
 $owner.Close()
 if ($r -eq [System.Windows.Forms.DialogResult]::OK) {
     [System.IO.File]::WriteAllText($env:TEMP + '\dsh-picker-result.txt', $f.SelectedPath, (New-Object System.Text.UTF8Encoding($false)))
@@ -1029,6 +1063,7 @@ while ($true) {
 Mgr-Log 'info' '面板已按请求退出，端口已释放。'
 try { $listener.Stop() } catch {}
 exit 0
+
 
 
 
