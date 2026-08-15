@@ -706,7 +706,7 @@ function updateMarketSortIcon() {
   btn.innerHTML =
     '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">' +
       '<path stroke-width="' + left + '" d="M6 21 L6 6 L1 12 L6 12"/>' +
-      '<path stroke-width="' + right + '" d="M14 4 L14 14 L18 14 L22 14 L18 20 L18 14"/>' +
+      '<path stroke-width="' + right + '" d="M18 3 L18 18 L23 12 L18 12"/>' +
     '</svg>';
 }
 
