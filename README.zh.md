@@ -1,8 +1,8 @@
-# dsh-launcher — DeepSeek Harness 管理面板
+﻿# dsh-manager — DeepSeek Harness 管理面板
 
 DeepSeek Harness（`dsh web`）的一键本地启动器与管理面板。双击即可启动 harness，随后在浏览器里管理：启动/停止/重启服务、安装/卸载/启停插件、查看实时日志、用原生对话框选择插件文件夹。
 
-面板后端是单文件 PowerShell HTTP 服务（`web-manager/server.ps1`）——无需 Node、无需数据库，除 Windows 自带能力外零依赖。
+面板后端是单文件 PowerShell HTTP 服务（`dsh-manager/server.ps1`）——无需 Node、无需数据库，除 Windows 自带能力外零依赖。
 
 ## 功能特性
 
@@ -15,7 +15,7 @@ DeepSeek Harness（`dsh web`）的一键本地启动器与管理面板。双击�
 
 ## 快速开始
 
-1. 双击 **`dsh-manager.cmd`**（或直接运行 `web-manager/server.ps1`）。
+1. 双击 **`dsh-manager.cmd`**（或直接运行 `dsh-manager/server.ps1`）。
 2. 面板地址 `http://127.0.0.1:3399`，dsh 服务地址 `http://127.0.0.1:3080`。
 3. 「一键启动」页启动服务，「插件管理」页管理插件。
 
@@ -43,12 +43,12 @@ DeepSeek Harness（`dsh web`）的一键本地启动器与管理面板。双击�
 ## 目录结构
 
 ```
-dsh-launcher/
+dsh-manager/
 ├── dsh-manager.cmd / .ps1   # 启动入口
 ├── start-dsh.cmd / .ps1     # 仅启动服务
 ├── build-icons.mjs          # 图标构建辅助
 ├── assets/                  # 面板图标
-└── web-manager/
+└── dsh-manager/
     ├── server.ps1           # 整个后端（HTTP 服务 + 全部动作）
     ├── app.js               # 前端逻辑
     ├── index.html           # 面板界面

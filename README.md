@@ -1,8 +1,8 @@
-# dsh-launcher — DeepSeek Harness Management Panel
+﻿# dsh-manager — DeepSeek Harness Management Panel
 
 A one-click local launcher and management panel for **DeepSeek Harness (`dsh web`)**. Double-click to start the harness, then manage it from a browser: start/stop/restart the service, install/uninstall/enable plugins, watch live logs, and pick plugin folders with a native dialog.
 
-The panel is a single-file PowerShell HTTP server (`web-manager/server.ps1`) — no Node, no database, no dependencies beyond what Windows ships.
+The panel is a single-file PowerShell HTTP server (`dsh-manager/server.ps1`) — no Node, no database, no dependencies beyond what Windows ships.
 
 ## Features
 
@@ -15,7 +15,7 @@ The panel is a single-file PowerShell HTTP server (`web-manager/server.ps1`) —
 
 ## Quick start
 
-1. Double-click **`dsh-manager.cmd`** (or run `web-manager/server.ps1`).
+1. Double-click **`dsh-manager.cmd`** (or run `dsh-manager/server.ps1`).
 2. The panel opens at `http://127.0.0.1:3399` and the dsh service at `http://127.0.0.1:3080`.
 3. Use the **Launch** tab to start the service, and the **Plugins** tab to manage plugins.
 
@@ -43,12 +43,12 @@ The panel is a single-file PowerShell HTTP server (`web-manager/server.ps1`) —
 ## Directory structure
 
 ```
-dsh-launcher/
+dsh-manager/
 ├── dsh-manager.cmd / .ps1   # launcher entry points
 ├── start-dsh.cmd / .ps1     # plain service start
 ├── build-icons.mjs          # icon build helper
 ├── assets/                  # panel icons
-└── web-manager/
+└── dsh-manager/
     ├── server.ps1           # the whole backend (HTTP server + all actions)
     ├── app.js               # front-end logic
     ├── index.html           # panel UI

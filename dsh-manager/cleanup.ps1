@@ -3,7 +3,7 @@
 $procs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue
 $killed = 0
 foreach ($p in $procs) {
-    if ($p.CommandLine -match 'web-manager[\\/]server\.ps1') {
+    if ($p.CommandLine -match 'dsh-manager[\\/]server\.ps1') {
         try {
             Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
             Write-Host ("已结束残留面板进程 PID {0}" -f $p.ProcessId)

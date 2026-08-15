@@ -1,4 +1,4 @@
-﻿# web-manager/server.ps1 — DSH 管理面板后端（本地 HTTP 服务 + 全部管理动作）
+﻿# dsh-manager/server.ps1 — DSH 管理面板后端（本地 HTTP 服务 + 全部管理动作）
 #
 # 用 TcpListener 实现的最小 HTTP 服务器（不依赖 http.sys，无需管理员 URL ACL），
 # 在 http://127.0.0.1:<ManagerPort>/ 提供管理面板 UI 与 REST API：
@@ -119,8 +119,8 @@ function Get-DshProcessIds {
             $parName = $map[$parent].Name.ToLower()
             if ($protect -contains $parName) { break }
             $parCmd = $map[$parent].Cmd
-            # 绝不结束本面板自身（server.ps1 / web-manager / dsh-manager）
-            if ($parCmd -match 'dsh-manager|server\.ps1|web-manager') { break }
+            # 绝不结束本面板自身（server.ps1 / dsh-manager）
+            if ($parCmd -match 'dsh-manager|server\.ps1') { break }
             $isConsoleHost = [string]::IsNullOrWhiteSpace($parCmd)
             $isDshShell = ($parCmd -match $binPat) -or ($parCmd -match '\bdsh\b')
             if (-not ($isConsoleHost -or $isDshShell)) { break }

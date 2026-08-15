@@ -366,7 +366,7 @@ function Start-DshPluginCommand([string]$profile, [string[]]$pluginArgs, [string
         if ($exit -eq 0) { Write-Log "[dsh] $doneLabel" }
         if ($AutoInstall) {
             try {
-                Add-Content -Path 'D:\Pro\dsh-launcher\_autostate.txt' -Value "install-exit=$exit" -Encoding UTF8
+                Add-Content -Path 'D:\Pro\dsh-manager\_autostate.txt' -Value "install-exit=$exit" -Encoding UTF8
             } catch {}
         }
         Refresh-PluginList
@@ -553,8 +553,8 @@ $form.StartPosition = 'CenterScreen'
 $form.Size = New-Object System.Drawing.Size(960, 700)
 $form.MinimumSize = New-Object System.Drawing.Size(820, 580)
 $form.BackColor = $script:Col.BgBase
-if (Test-Path 'D:\Pro\dsh-launcher\assets\dsh-whale.ico') {
-    try { $form.Icon = New-Object System.Drawing.Icon('D:\Pro\dsh-launcher\assets\dsh-whale.ico') } catch {}
+if (Test-Path 'D:\Pro\dsh-manager\assets\dsh-whale.ico') {
+    try { $form.Icon = New-Object System.Drawing.Icon('D:\Pro\dsh-manager\assets\dsh-whale.ico') } catch {}
 }
 $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9.5)
 
@@ -585,8 +585,8 @@ $whaleBox.BackColor = $script:Col.BgSide
 $whitePng = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'assets\dsh-whale-white.png'
 if (Test-Path $whitePng) {
     try { $whaleBox.Image = [System.Drawing.Image]::FromFile($whitePng) } catch {}
-} elseif (Test-Path 'D:\Pro\dsh-launcher\assets\dsh-whale.ico') {
-    try { $whaleBox.Image = (New-Object System.Drawing.Icon('D:\Pro\dsh-launcher\assets\dsh-whale.ico')).ToBitmap() } catch {}
+} elseif (Test-Path 'D:\Pro\dsh-manager\assets\dsh-whale.ico') {
+    try { $whaleBox.Image = (New-Object System.Drawing.Icon('D:\Pro\dsh-manager\assets\dsh-whale.ico')).ToBitmap() } catch {}
 }
 $sidebar.Controls.Add($whaleBox)
 

@@ -1,5 +1,5 @@
-{
-  "name": "dsh-launcher",
+﻿{
+  "name": "dsh-manager",
   "private": true,
   "type": "module",
   "description": "One-click local launcher for DeepSeek Harness (dsh web)"
