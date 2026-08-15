@@ -420,32 +420,42 @@ async function installPlugin() {
 
 // 通用目录选择：后端弹原生文件夹对话框（独立进程），轮询取回所选路径
 async function pickDirectory(desc, onPicked) {
+  // 打开对话框（失败自动重试一次，规避偶发的连接超时）
   let opened = false;
-  try {
-    const r = await api('/api/pick-directory', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ desc: desc }),
-    }, 10000);
-    if (!r || !r.ok) {
-      alert('无法打开文件夹选择器：' + (r && r.message || '未知错误'));
+  let r = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      r = await api('/api/pick-directory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ desc: desc }),
+      }, 10000);
+      break;
+    } catch (e) {
+      if (attempt === 0) {
+        await new Promise(res => setTimeout(res, 700));
+        continue;
+      }
+      alert('无法打开文件夹选择器：' + e.message);
       return;
     }
-    opened = true;
-    // 轮询选择结果（最长 120 秒；对话框关闭后由后端写入结果文件）
-    const deadline = Date.now() + 120000;
-    while (Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 600));
-      const res = await api('/api/pick-directory-result', {}, 5000).catch(() => null);
-      if (res && res.done) {
-        if (res.path) onPicked(res.path);
-        return; // 取消也到此结束
-      }
-    }
-    alert('选择文件夹超时，请重试');
-  } catch (e) {
-    alert(opened ? '选择文件夹失败：' + e.message : '无法打开文件夹选择器：' + e.message);
   }
+  if (!r || !r.ok) {
+    alert('无法打开文件夹选择器：' + (r && r.message || '未知错误'));
+    return;
+  }
+  opened = true;
+  // 轮询选择结果（最长 120 秒；对话框关闭后由后端写入结果文件）
+  const deadline = Date.now() + 120000;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 600));
+    const res = await api('/api/pick-directory-result', {}, 5000).catch(() => null);
+    if (res && res.done) {
+      if (res.path) onPicked(res.path);
+      return; // 取消也到此结束
+    }
+  }
+  alert('选择文件夹超时，请重试');
 }
 
 // 插件安装：点击文件夹图标选择本地插件文件夹

@@ -785,11 +785,11 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
 function Handle-Client($client) {
     $stream = $null
     try {
-        # NoDelay 降低小请求延迟；读超时缩短到 2s：浏览器预连接的空闲 socket
-        # 不会长时间卡住单线程 accept 循环（否则后续启动/停止请求会排队超时）。
+        # NoDelay 降低小请求延迟；读超时 5s：浏览器预连接的空闲 socket 不会长时间
+        # 卡住单线程 accept 循环，同时给真实请求留足余量（超时只静默关闭，绝不回 500）。
         $client.NoDelay = $true
         $stream = $client.GetStream()
-        $stream.ReadTimeout = 2000
+        $stream.ReadTimeout = 5000
         $buf = New-Object byte[] 8192
         $headerText = ''
         while ($true) {
@@ -830,8 +830,16 @@ function Handle-Client($client) {
         $resp = Route-Request $method $rawPath $body
         Send-Response $stream $resp
     } catch {
-        Write-Crash 'HandleClient' $_
-        try { Send-Response $stream ([pscustomobject]@{ code = 500; type = 'text/plain; charset=utf-8'; data = 'internal error' }) } catch {}
+        # 连接级异常：读超时/空闲连接是正常现象，静默关闭即可（绝不返回 500，
+        # 否则前端会误报请求失败）；真实的路由错误已由 Route-Request 返回 JSON。
+        $isTimeout = $false
+        $ex = $_.Exception
+        while ($ex -ne $null) {
+            if ($ex -is [System.Net.Sockets.SocketException] -and $ex.ErrorCode -eq 10060) { $isTimeout = $true; break }
+            $ex = $ex.InnerException
+        }
+        if (-not $isTimeout) { Write-Crash 'HandleClient' $_ }
+        try { $client.Close() } catch {}
     } finally {
         try { $client.Close() } catch {}
     }
@@ -888,5 +896,6 @@ while ($true) {
         Start-Sleep -Milliseconds 200
     }
 }
+
 
 
