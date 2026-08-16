@@ -24,7 +24,8 @@ param(
     [int]$ManagerPort = 3399,
     [int]$Port = 3080,
     [string]$Checkout = 'D:\AI\DeepSeekHarness\deepseek-harness',
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    [switch]$Restart
 )
 
 $script:Port = $Port
@@ -1179,15 +1180,24 @@ function Handle-Client($client) {
 
 # 单实例守卫：默认端口已被本面板（server.ps1）占用时不再启动第二个实例，
 # 直接打开已有面板并退出 —— 避免多次双击叠加多个面板实例 / 多个浏览器标签。
+# 传 -Restart（dsh-manager.cmd -restart）可强制替换旧面板：结束旧进程后启动新版，
+# 面板代码更新后无需手动找进程杀。
 $existing = Get-NetTCPConnection -LocalPort $ManagerPort -State Listen -ErrorAction SilentlyContinue
 if ($existing) {
     $owner = $null
     try { $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$($existing.OwningProcess)" -ErrorAction SilentlyContinue } catch {}
     $isPanel = $owner -and $owner.CommandLine -match 'server[.]ps1'
     if ($isPanel) {
-        Write-Host "[dsh] 管理面板已在运行（端口 $ManagerPort），直接打开浏览器。"
-        try { Start-Process $script:ManagerUrl } catch {}
-        exit 0
+        if ($Restart) {
+            Write-Host "[dsh] 检测到旧面板（PID $($existing.OwningProcess)），-Restart：结束旧进程后启动新版..."
+            & (Join-Path $env:WINDIR 'System32\taskkill.exe') /PID $existing.OwningProcess /T /F 2>&1 | Out-Null
+            Start-Sleep -Milliseconds 800
+        } else {
+            Write-Host "[dsh] 管理面板已在运行（端口 $ManagerPort），直接打开浏览器。"
+            Write-Host "[dsh] 提示：若面板为旧版本（代码已更新），请关闭旧面板窗口后重试，或运行 dsh-manager.cmd -restart 强制替换。"
+            try { Start-Process $script:ManagerUrl } catch {}
+            exit 0
+        }
     }
 }
 
