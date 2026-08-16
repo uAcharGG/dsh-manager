@@ -479,15 +479,19 @@ function Start-Dsh {
     $cmdLine = '"' + $launch.File + '" ' + $quoted + ' --port ' + $Port + ' >> "' + $script:LaunchLog + '" 2>&1'
     Mgr-Log 'info' "启动：$cmdLine（cwd: $script:Checkout）"
     # 最多尝试 3 次：Process.Start 可能因控制台句柄瞬时失效（GetConsoleMode 0xE9 /
-    # ERROR_BROKEN_PIPE）抛 Win32Exception，重试通常可自愈；每次重建 Process 对象
+    # ERROR_BROKEN_PIPE）抛 Win32Exception，重试通常可自愈；每次重建 Process 对象。
+    # 必须用 UseShellExecute=$true（ShellExecuteEx 路径不读取父进程控制台模式）：
+    # 用 UseShellExecute=$false + CreateNoWindow 时，若面板自身的控制台句柄已失效
+    # （窗口被关闭/输出管道断开），cmd 子进程的 GetConsoleMode 会抛 0xE9 导致启动
+    # 失败；WindowStyle=Hidden 负责隐藏 cmd 窗口，cmd /c 内部的 >> 重定向不受影响。
     $started = $false
     for ($attempt = 1; $attempt -le 3 -and -not $started; $attempt++) {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = "$env:COMSPEC"
         $psi.Arguments = '/d /s /c "' + $cmdLine + '"'
         $psi.WorkingDirectory = $script:Checkout
-        $psi.UseShellExecute = $false
-        $psi.CreateNoWindow = $true
+        $psi.UseShellExecute = $true
+        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
         $proc = New-Object System.Diagnostics.Process
         $proc.StartInfo = $psi
         try {
