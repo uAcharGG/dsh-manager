@@ -58,7 +58,9 @@ trap { Write-Crash 'TRAP' $_; continue }
 function Mgr-Log([string]$level, [string]$text) {
     $line = "[{0}] {1} [dsh] {2}" -f (Get-Date -Format 'HH:mm:ss'), $level, $text
     try { Add-Content -Path $script:LaunchLog -Value $line -Encoding UTF8 } catch {}
-    Write-Host $line
+    # 控制台写入必须防弹：面板进程的控制台句柄可能失效（如窗口被关闭/管道断开），
+    # 此时 Write-Host 会抛 Win32Exception（GetConsoleMode 0xE9），不能让日志把请求搞挂
+    try { Write-Host $line } catch {}
 }
 # 插件日志
 function Plugin-Log([string]$level, [string]$text) {
@@ -476,19 +478,31 @@ function Start-Dsh {
     $quoted = @($launch.Args | ForEach-Object { '"' + $_ + '"' }) -join ' '
     $cmdLine = '"' + $launch.File + '" ' + $quoted + ' --port ' + $Port + ' >> "' + $script:LaunchLog + '" 2>&1'
     Mgr-Log 'info' "启动：$cmdLine（cwd: $script:Checkout）"
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "$env:COMSPEC"
-    $psi.Arguments = '/d /s /c "' + $cmdLine + '"'
-    $psi.WorkingDirectory = $script:Checkout
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
-    try {
-        $started = $proc.Start()
-    } catch {
-        Mgr-Log 'error' "启动失败：$($_.Exception.Message)"
-        return @{ ok = $false; message = $_.Exception.Message }
+    # 最多尝试 3 次：Process.Start 可能因控制台句柄瞬时失效（GetConsoleMode 0xE9 /
+    # ERROR_BROKEN_PIPE）抛 Win32Exception，重试通常可自愈；每次重建 Process 对象
+    $started = $false
+    for ($attempt = 1; $attempt -le 3 -and -not $started; $attempt++) {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "$env:COMSPEC"
+        $psi.Arguments = '/d /s /c "' + $cmdLine + '"'
+        $psi.WorkingDirectory = $script:Checkout
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        try {
+            $started = $proc.Start()
+            if (-not $started) { throw 'Process.Start 返回 false' }
+        } catch {
+            try { $proc.Dispose() } catch {}
+            if ($attempt -lt 3) {
+                Mgr-Log 'warn' "启动尝试 $attempt/3 失败（$($_.Exception.Message)），1 秒后重试..."
+                Start-Sleep -Seconds 1
+            } else {
+                Mgr-Log 'error' "启动失败（已重试 3 次）：$($_.Exception.Message)"
+                return @{ ok = $false; message = $_.Exception.Message }
+            }
+        }
     }
     Mgr-Log 'info' "已发起启动（PID $($proc.Id)），等待端口 $Port 就绪（最多 60 秒）..."
     Mgr-Log 'info' '服务就绪后可在面板打开服务地址。'
