@@ -312,6 +312,56 @@ function Get-InstallSpec([string]$source, [string]$value) {
     return $value
 }
 
+# 清理 profile node_modules 里的过期重解析点（残留 junction/符号链接）。
+# 背景：插件从本地 link: 安装时，node_modules\<pkg> 是指向本地目录的 junction；
+# 之后若改用官方 tarball/npm/git 安装，pnpm 导入时会把旧链接指向的本地目录的
+# node_modules（其中可能含指向 $DSH_HOME\profiles\node_modules 的 junction）搬进
+# 临时目录重建，触发 Windows EPERM（ERR_PNPM_EPERM: symlink ... operation not
+# permitted）。官方命令 pnpm dsh plugin add 不会清理此类残留，故安装前在此删除：
+# 只删「package.json 中已无该依赖」且「指向非 pnpm store 的本地目录」的链接，
+# 正常安装的链接（store 链接 / 仍在依赖中的本地 link:）不受影响。
+function Clear-StaleLinks([string]$profile) {
+    $dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+    $nm = Join-Path $dshHome "profiles\$profile\node_modules"
+    $manifestPath = Join-Path $dshHome "profiles\$profile\package.json"
+    if (-not (Test-Path $nm) -or -not (Test-Path $manifestPath)) { return }
+    $deps = @{}
+    try {
+        $m = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        foreach ($k in @($m.dependencies.PSObject.Properties.Name)) { $deps[$k] = $true }
+    } catch { return }
+    # 本 profile 的 pnpm store 路径（.modules.yaml 的 storeDir，缺省走 LOCALAPPDATA）
+    $storeDir = ''
+    $modulesYaml = Join-Path $nm '.modules.yaml'
+    if (Test-Path $modulesYaml) {
+        try {
+            $raw = Get-Content -LiteralPath $modulesYaml -Raw
+            if ($raw -match 'storeDir:\s*["'']?([^"''\r\n]+)') { $storeDir = $matches[1].Trim() }
+        } catch {}
+    }
+    if ($storeDir -eq '') { $storeDir = Join-Path $env:LOCALAPPDATA 'pnpm\store' }
+    $candidates = @()
+    $candidates += Get-ChildItem -LiteralPath $nm -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }
+    foreach ($scope in Get-ChildItem -LiteralPath $nm -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name.StartsWith('@') }) {
+        $candidates += Get-ChildItem -LiteralPath $scope.FullName -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }
+    }
+    foreach ($c in $candidates) {
+        $name = if ($c.Parent.Name.StartsWith('@')) { "$($c.Parent.Name)/$($c.Name)" } else { $c.Name }
+        if ($deps.ContainsKey($name)) { continue }
+        $target = @($c.Target)[0]
+        if (-not $target) { continue }
+        if ($storeDir -ne '' -and $target.StartsWith($storeDir, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        # rmdir 只删 reparse point 本身，不动目标目录
+        cmd /c rmdir "$($c.FullName)" 2>$null
+        if (-not (Test-Path $c.FullName)) {
+            Plugin-Log 'info' "已清理残留链接：$name -> $target"
+        }
+    }
+}
+
 # 异步插件命令（后台 job，输出实时写入插件日志）
 # 与老实现同款命令：pnpm dsh plugin --profile <profile> add/remove <spec>（cwd=checkout）
 function Start-PluginJob([string]$profile, [string[]]$pnpmArgs, [string]$doneLabel, [string]$onSuccess = '') {
@@ -947,6 +997,8 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
                 if ($pProfile -eq '' -or $pSpec -eq '') { return New-JsonResp @{ error = 'profile/spec required' } 400 }
                 $spec = Get-InstallSpec $pSource $pSpec
                 if ($spec -eq '') { return New-JsonResp @{ error = 'spec empty' } 400 }
+                # 先清理残留链接（防止旧本地链接与 tarball/npm 安装冲突触发 EPERM）
+                Clear-StaleLinks $pProfile
                 if (-not (Start-PluginJob $pProfile @('add', $spec) '安装成功。Web 端插件需重启 dsh 才生效。')) {
                     return New-JsonResp @{ ok = $false; message = '已有插件操作在进行中。' } 409
                 }
