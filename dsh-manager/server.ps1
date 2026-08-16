@@ -315,6 +315,60 @@ function Get-InstallSpec([string]$source, [string]$value) {
     return $value
 }
 
+# 补全 lockfile 中 tarball URL 条目缺失的 integrity。
+# 背景：pnpm 对 URL tarball 从 store 缓存复用（reused）时，写回 lockfile 的条目
+# 可能没有 integrity 字段，随后 tarball-fetcher 拒绝安装（ERR_PNPM_MISSING_
+# TARBALL_INTEGRITY），remove 后重装同一 URL 必然踩到。这里下载 tarball 计算
+# sha512 写回 lockfile，让 pnpm 直接复用完整条目（离线成功）。
+function Repair-TarballIntegrity([string]$profile, [string]$spec) {
+    if ($spec -notmatch '^https?://' -or $spec -notmatch '\.(tgz|tar\.gz)(\?|$)') { return }
+    $dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+    $lfPath = Join-Path $dshHome "profiles\$profile\pnpm-lock.yaml"
+    if (-not (Test-Path $lfPath)) { return }
+    $lf = Get-Content -LiteralPath $lfPath -Raw -Encoding UTF8
+    $esc = [regex]::Escape($spec)
+    # 条目不存在，或已有 integrity -> 无需处理
+    if ($lf -notmatch "tarball: $esc") { return }
+    if ($lf -match "integrity: [^,]+, tarball: $esc") { return }
+    $tmp = Join-Path $env:TEMP ('dshm-tgz-' + [guid]::NewGuid().ToString('N') + '.tgz')
+    try {
+        $ok = $false
+        # 依次尝试：面板环境代理 -> Clash 默认端口 -> 直连
+        $proxies = @()
+        if ($env:HTTPS_PROXY) { $proxies += $env:HTTPS_PROXY }
+        $proxies += 'http://127.0.0.1:7897'
+        $proxies += $null
+        foreach ($proxy in $proxies) {
+            try {
+                if ($proxy) {
+                    Invoke-WebRequest -Uri $spec -OutFile $tmp -UseBasicParsing -Proxy $proxy -TimeoutSec 45 -ErrorAction Stop
+                } else {
+                    Invoke-WebRequest -Uri $spec -OutFile $tmp -UseBasicParsing -TimeoutSec 45 -ErrorAction Stop
+                }
+                $ok = $true
+                break
+            } catch {}
+        }
+        if (-not $ok) {
+            Plugin-Log 'warn' "无法下载 tarball 计算 integrity（网络受限），跳过自动修复：$spec"
+            return
+        }
+        $hex = (Get-FileHash -LiteralPath $tmp -Algorithm SHA512).Hash
+        $bytes = New-Object byte[] ($hex.Length / 2)
+        for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
+        $b64 = [Convert]::ToBase64String($bytes)
+        $newLf = $lf -replace "(?m)(resolution: \{)(tarball: $esc)(\})", ('${1}integrity: sha512-' + $b64 + ', ${2}${3}')
+        if ($newLf -eq $lf) {
+            Plugin-Log 'warn' "lockfile 中未找到可修复的 resolution 行：$spec"
+            return
+        }
+        [IO.File]::WriteAllText($lfPath, $newLf, (New-Object Text.UTF8Encoding($false)))
+        Plugin-Log 'info' "已自动补全 tarball integrity（sha512-$b64 的前 16 位：$($b64.Substring(0,16))...）"
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # 清理 profile node_modules 里的过期重解析点（残留 junction/符号链接）。
 # 背景：插件从本地 link: 安装时，node_modules\<pkg> 是指向本地目录的 junction；
 # 之后若改用官方 tarball/npm/git 安装，pnpm 导入时会把旧链接指向的本地目录的
@@ -1018,6 +1072,8 @@ function Route-Request([string]$method, [string]$rawPath, [string]$body) {
                 if ($spec -eq '') { return New-JsonResp @{ error = 'spec empty' } 400 }
                 # 先清理残留链接（防止旧本地链接与 tarball/npm 安装冲突触发 EPERM）
                 Clear-StaleLinks $pProfile
+                # tarball 来源：补全 lockfile 缺失的 integrity（避免 MISSING_TARBALL_INTEGRITY）
+                if ($spec -match '^https?://') { Repair-TarballIntegrity $pProfile $spec }
                 if (-not (Start-PluginJob $pProfile @('add', $spec) '安装成功。Web 端插件需重启 dsh 才生效。')) {
                     return New-JsonResp @{ ok = $false; message = '已有插件操作在进行中。' } 409
                 }
